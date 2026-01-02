@@ -1,0 +1,209 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  
+  # Include test files
+  tests: true
+  
+  # Which dirs to skip
+  skip-dirs:
+    - vendor
+    - bin
+    - dist
+    - .github
+  
+  # Which files to skip
+  skip-files:
+    - ".*\\.pb\\.go$"
+    - ".*_generated\\.go$"
+
+# Output configuration
+output:
+  # Format: colored-line-number|line-number|json|tab|checkstyle|code-climate|junit-xml|github-actions
+  format: colored-line-number
+  
+  # Print lines of code with issue
+  print-issued-lines: true
+  
+  # Print linter name in the end of issue text
+  print-linter-name: true
+  
+  # Make issues output unique by line
+  uniq-by-line: true
+  
+  # Sort results by: filepath, line and column
+  sort-results: true
+
+# Linters settings
+linters-settings:
+  # Errcheck - check for unchecked errors
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - (*github.com/hashicorp/vault/sdk/logical.Response).Error
+  
+  # Gocyclo - cyclomatic complexity
+  gocyclo:
+    min-complexity: 15
+  
+  # Gofmt - check formatting
+  gofmt:
+    simplify: true
+  
+  # Goimports - check import formatting
+  goimports:
+    local-prefixes: github.com/angel-one/go-skyflow-harshicorp-plugin
+  
+  # Govet - report suspicious constructs
+  govet:
+    check-shadowing: true
+    enable-all: true
+  
+  # Misspell - check spelling
+  misspell:
+    locale: US
+  
+  # Revive - golint replacement
+  revive:
+    severity: warning
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+  
+  # Staticcheck - static analysis
+  staticcheck:
+    checks: ["all"]
+  
+  # Unused - check for unused code
+  unused:
+    check-exported: false
+  
+  # Gosec - security issues
+  gosec:
+    severity: medium
+    confidence: medium
+    excludes:
+      - G104 # Audit errors not checked
+      - G304 # File path provided as taint input
+  
+  # Dupl - code clone detection
+  dupl:
+    threshold: 150
+  
+  # Goconst - repeated strings that could be constants
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  
+  # Lll - line length
+  lll:
+    line-length: 120
+    tab-width: 4
+
+# Linters to enable
+linters:
+  disable-all: true
+  enable:
+    # Enabled by default
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Examine Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Go static analysis
+    - typecheck     # Type-check Go code
+    - unused        # Check for unused code
+    
+    # Additional linters
+    - bodyclose     # Check HTTP response body is closed
+    - dupl          # Code clone detection
+    - gocyclo       # Cyclomatic complexity
+    - gofmt         # Check formatting
+    - goimports     # Check import formatting
+    - gosec         # Security issues
+    - misspell      # Spelling mistakes
+    - revive        # Fast linter (golint replacement)
+    - unconvert     # Remove unnecessary type conversions
+    - unparam       # Unused function parameters
+    - whitespace    # Whitespace issues
+    - goconst       # Repeated strings
+    - gocritic      # Go code critic
+    - gocognit      # Cognitive complexity
+    - godot         # Check comments end in period
+    - prealloc      # Slice preallocation
+    - exportloopref # Check loop variable references
+    - nilerr        # Check nil error returns
+    - nilnil        # Check nil nil returns
+    - noctx         # HTTP requests without context
+    - predeclared   # Check predeclared identifiers
+
+# Issues configuration
+issues:
+  # Maximum issues count per one linter
+  max-issues-per-linter: 50
+  
+  # Maximum count of issues with the same text
+  max-same-issues: 3
+  
+  # Exclude known issues
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - goconst
+    
+    # Exclude some staticcheck messages
+    - linters:
+        - staticcheck
+      text: "SA1019:"  # Deprecated
+    
+    # Exclude lll issues for long lines with go:generate
+    - linters:
+        - lll
+      source: "^//go:generate "
+  
+  # Show only new issues
+  new: false
+  
+  # Fix found issues (if supported by linter)
+  fix: false
+
+# Severity configuration
+severity:
+  default-severity: error
+  rules:
+    - linters:
+        - dupl
+      severity: info
+    - linters:
+        - goconst
+      severity: info

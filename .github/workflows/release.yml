@@ -1,0 +1,341 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.0.0, v2.1.3, etc.
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GO_VERSION: '1.25.0'
+
+jobs:
+  # Validate release tag format
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag format
+        id: get_version
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "Tag: $TAG"
+          
+          # Validate semantic versioning format
+          if [[ ! $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "Invalid tag format: $TAG"
+            echo "Expected format: v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          
+          VERSION=${TAG#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check if tag exists in remote
+        run: |
+          git fetch --tags
+          if ! git tag -l | grep -q "^${GITHUB_REF#refs/tags/}$"; then
+            echo "Tag does not exist in remote"
+            exit 1
+          fi
+
+  # Run tests before release
+  test:
+    name: Test Before Release
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Check coverage
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: $COVERAGE%"
+          if (( $(echo "$COVERAGE < 70" | bc -l) )); then
+            echo "Coverage is below 70%, blocking release"
+            exit 1
+          fi
+
+  # Build binaries for all platforms
+  build:
+    name: Build Release Binaries
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          BINARY_NAME=skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}
+          
+          if [ "${{ matrix.os }}" == "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          
+          mkdir -p dist
+          
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${GITHUB_SHA} -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/${BINARY_NAME}" \
+            ./main.go
+          
+          # Create compressed archive
+          cd dist
+          if [ "${{ matrix.os }}" == "windows" ]; then
+            zip "${BINARY_NAME}.zip" "${BINARY_NAME}"
+          else
+            tar czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"
+          fi
+          cd ..
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" == "windows" ]; then
+            sha256sum skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}.exe.zip > skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}.exe.zip.sha256
+          else
+            sha256sum skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}.tar.gz > skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyflow-plugin-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
+  # Create GitHub release
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          
+          # Create combined SHA256SUMS file
+          cd release-assets
+          cat *.sha256 > SHA256SUMS
+          rm *.sha256
+          cd ..
+          
+          ls -lah release-assets/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION=${{ needs.validate.outputs.version }}
+          
+          cat > RELEASE_NOTES.md << EOF
+          ## Skyflow Vault Plugin ${VERSION}
+          
+          ### 📦 Installation
+          
+          Download the appropriate binary for your platform from the assets below.
+          
+          **Linux (amd64)**
+          \`\`\`bash
+          curl -LO https://github.com/${{ github.repository }}/releases/download/v${VERSION}/skyflow-plugin-linux-amd64.tar.gz
+          tar xzf skyflow-plugin-linux-amd64.tar.gz
+          sudo mv skyflow-plugin-linux-amd64 /etc/vault/plugins/skyflow-plugin
+          \`\`\`
+          
+          **macOS (Apple Silicon)**
+          \`\`\`bash
+          curl -LO https://github.com/${{ github.repository }}/releases/download/v${VERSION}/skyflow-plugin-darwin-arm64.tar.gz
+          tar xzf skyflow-plugin-darwin-arm64.tar.gz
+          sudo mv skyflow-plugin-darwin-arm64 /etc/vault/plugins/skyflow-plugin
+          \`\`\`
+          
+          **Windows (amd64)**
+          \`\`\`powershell
+          curl.exe -LO https://github.com/${{ github.repository }}/releases/download/v${VERSION}/skyflow-plugin-windows-amd64.exe.zip
+          Expand-Archive skyflow-plugin-windows-amd64.exe.zip
+          \`\`\`
+          
+          ### 🔐 Verification
+          
+          Verify the checksum of your download:
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          \`\`\`
+          
+          ### 📋 What's Changed
+          
+          EOF
+          
+          # Get commits since last tag
+          PREVIOUS_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...v${VERSION}" >> RELEASE_NOTES.md
+            echo "" >> RELEASE_NOTES.md
+            echo "### Commits" >> RELEASE_NOTES.md
+            git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+          else
+            echo "Initial release" >> RELEASE_NOTES.md
+          fi
+          
+          cat RELEASE_NOTES.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-assets/*
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-alpha') || contains(github.ref, '-rc') }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish Docker image (optional)
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            COMMIT=${{ github.sha }}
+
+  # Notify on success/failure
+  notify:
+    name: Release Notification
+    runs-on: ubuntu-latest
+    needs: [validate, test, build, release, docker]
+    if: always()
+    steps:
+      - name: Send notification
+        run: |
+          VERSION=${{ needs.validate.outputs.version }}
+          
+          if [ "${{ needs.release.result }}" == "success" ]; then
+            echo "✅ Release v${VERSION} completed successfully!"
+            echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"
+          else
+            echo "❌ Release v${VERSION} failed!"
+            exit 1
+          fi
+
+  # Update documentation (optional)
+  docs:
+    name: Update Documentation
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: success()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update version in README
+        run: |
+          VERSION=${{ needs.validate.outputs.version }}
+          sed -i "s/version-[0-9]\+\.[0-9]\+\.[0-9]\+/version-${VERSION}/g" README.md || true
+          sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v${VERSION}/g" README.md || true
+
+      - name: Commit documentation updates
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add README.md
+          git diff --staged --quiet || git commit -m "docs: update version to ${{ needs.validate.outputs.version }}"
+          git push

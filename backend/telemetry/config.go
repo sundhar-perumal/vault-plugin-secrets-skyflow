@@ -14,6 +14,7 @@ type Config struct {
 	// Service identity
 	ServiceName      string
 	ServiceNamespace string
+	ServiceVersion   string
 	Environment      string
 
 	// Traces configuration
@@ -39,6 +40,7 @@ func DefaultConfig() *Config {
 		Enabled:               true,
 		ServiceName:           "skyflow-vault-plugin",
 		ServiceNamespace:      "skyflow",
+		ServiceVersion:        "unknown",
 		Environment:           "unknown",
 		TracesEnabled:         true,
 		MetricsEnabled:        true,
@@ -50,6 +52,13 @@ func DefaultConfig() *Config {
 // ConfigFromEnv builds configuration from environment variables
 func ConfigFromEnv() *Config {
 	config := DefaultConfig()
+
+	// ENV=dev forces telemetry off for local development
+	if env := os.Getenv("ENV"); strings.ToLower(env) == "dev" {
+		config.Enabled = false
+		config.Environment = "dev"
+		return config
+	}
 
 	// Master switch
 	if val := os.Getenv("TELEMETRY_ENABLED"); val != "" {

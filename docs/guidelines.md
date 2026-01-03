@@ -1,357 +1,190 @@
-# Skyflow Vault Plugin - Guidelines
+# Guidelines
 
-API reference, security controls, and operational guidelines for the Skyflow Vault Plugin.
-
-## Table of Contents
-
-- [Authentication](#authentication)
-- [API Reference](#api-reference)
-- [Security Controls](#security-controls)
-- [Vault Policies](#vault-policies)
-- [Operational Guidelines](#operational-guidelines)
-- [Incident Response](#incident-response)
-
----
-
-## Authentication
-
-All API requests must be authenticated using a valid Vault token:
-
-```bash
-curl \
-    --header "X-Vault-Token: $VAULT_TOKEN" \
-    $VAULT_ADDR/v1/skyflow/...
-```
+API reference, security, and testing for developers.
 
 ---
 
 ## API Reference
 
-### Configuration Endpoints
+### Config Endpoint
 
-#### Create/Update Configuration
+**`POST /skyflow/config`** - Configure backend credentials
 
-**Endpoint:** `POST/PUT /skyflow/config`
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `credentials_file_path` | string | conditional | Path to SA JSON file |
+| `credentials_json` | string | conditional | SA JSON inline |
+| `description` | string | no | Description |
+| `tags` | []string | no | Organization tags |
+| `validate_credentials` | bool | no | Test credentials (default: true) |
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `credentials_file_path` | string | conditional | Path to Skyflow credentials JSON file |
-| `credentials_json` | string | conditional | Skyflow credentials as JSON string |
-| `max_retries` | integer | no | Maximum API retry attempts (0-10). Default: 3 |
-| `request_timeout` | integer | no | Request timeout in seconds (1-300). Default: 30 |
-| `description` | string | no | Configuration description |
-
-**Validation:**
-- Must provide exactly one of `credentials_file_path` or `credentials_json`
-- `credentials_json` must be valid JSON if provided
-
-**Example:**
-```bash
-vault write skyflow/config \
-    credentials_file_path="/etc/skyflow/credentials.json" \
-    max_retries=3 \
-    request_timeout=30 \
-    description="Production configuration"
-```
-
-#### Read Configuration
-
-**Endpoint:** `GET /skyflow/config`
-
-Returns configuration with credentials masked.
+> Provide exactly one of `credentials_file_path` or `credentials_json`
 
 ```bash
-vault read skyflow/config
-```
-
-**Response:**
-```json
-{
-  "data": {
-    "credentials_configured": true,
-    "credentials_type": "file_path",
-    "credentials_file_path": "/etc/skyflow/credentials.json",
-    "max_retries": 3,
-    "request_timeout": 30
-  }
-}
-```
-
-#### Delete Configuration
-
-**Endpoint:** `DELETE /skyflow/config`
-
-```bash
-vault delete skyflow/config
+vault write skyflow/insurance/config \
+  credentials_file_path="/etc/vault/creds/sa.json" \
+  description="Insurance credentials" \
+  tags="production,insurance"
 ```
 
 ---
 
 ### Role Endpoints
 
-#### List Roles
+**`POST /skyflow/roles/:name`** - Create/update role
 
-**Endpoint:** `LIST /skyflow/roles`
-
-```bash
-vault list skyflow/roles
-```
-
-#### Create/Update Role
-
-**Endpoint:** `POST/PUT /skyflow/roles/:name`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role_ids` | []string | **yes** | Skyflow role ID (exactly 1) |
 | `description` | string | no | Role description |
-| `vault_id` | string | no | Skyflow Vault ID |
-| `account_id` | string | no | Skyflow Account ID |
-| `scopes` | []string | no | Permission scopes |
-| `ttl` | integer | no | Token TTL in seconds. Default: 3600 |
-| `max_ttl` | integer | no | Maximum token TTL. Default: 3600 |
-| `credentials_file_path` | string | no | Override credentials file path |
-| `credentials_json` | string | no | Override credentials JSON |
 | `tags` | []string | no | Organization tags |
 
-**Example:**
 ```bash
-vault write skyflow/roles/my-app \
-    description="My application role" \
-    vault_id="vault123" \
-    ttl=3600 \
-    tags="production,backend"
+vault write skyflow/insurance/roles/producer \
+  role_ids="skyflow-role-abc123" \
+  description="Producer role" \
+  tags="producer,insurance"
 ```
 
-#### Read Role
-
-**Endpoint:** `GET /skyflow/roles/:name`
-
-```bash
-vault read skyflow/roles/my-app
-```
-
-#### Delete Role
-
-**Endpoint:** `DELETE /skyflow/roles/:name`
-
-```bash
-vault delete skyflow/roles/my-app
-```
+**`LIST /skyflow/roles`** - List all roles
+**`GET /skyflow/roles/:name`** - Read role
+**`DELETE /skyflow/roles/:name`** - Delete role
 
 ---
 
-### Token Generation
+### Token Endpoint
 
-#### Generate Token
+**`GET /skyflow/creds/:name`** - Generate bearer token
 
-**Endpoint:** `GET /skyflow/creds/:name`
-
-Generates a fresh Skyflow bearer token for the specified role.
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ctx` | string | no | Context data for token |
 
 ```bash
-vault read skyflow/creds/my-app
+# Basic
+vault read skyflow/insurance/creds/producer
+
+# With context
+vault read skyflow/insurance/creds/producer ctx="user:12345"
 ```
 
 **Response:**
 ```json
 {
-  "data": {
-    "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "token_type": "Bearer",
-    "expires_in": 3600,
-    "expires_at": "2025-12-30T15:00:00Z"
-  }
+  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "token_type": "Bearer"
 }
 ```
 
 ---
 
-### Health and Metrics
+### Health Endpoint
 
-#### Health Check
-
-**Endpoint:** `GET /skyflow/health`
-
-```bash
-vault read skyflow/health
-```
-
-#### Metrics
-
-**Endpoint:** `GET /skyflow/metrics`
-
-```bash
-vault read skyflow/metrics
-```
+**`GET /skyflow/health`** - Plugin health status
 
 ---
 
-## Security Controls
+## Security
 
 ### Credential Protection
 
 | Control | Implementation |
 |---------|----------------|
-| **Seal-wrap encryption** | Credentials encrypted with Vault's seal key |
-| **Credential masking** | Credentials never returned in API responses |
-| **Short-lived tokens** | Maximum TTL: 3600 seconds (1 hour) |
+| Storage | Vault seal-wrap encryption |
+| API Response | Credentials never exposed |
+| Tokens | Short-lived JWT (max 1hr) |
 
-### Circuit Breaker
+### Vault Policies
 
-Protects against Skyflow API failures:
-
-| Setting | Value |
-|---------|-------|
-| Max failures | 5 |
-| Reset timeout | 60 seconds |
-| States | closed → open → half-open → closed |
-
-### Telemetry
-
-OpenTelemetry integration for observability:
-
-| Feature | Description |
-|---------|-------------|
-| **Traces** | Distributed tracing for token generation |
-| **Metrics** | Token generation counts, latency histograms |
-| **Configurable** | Enable/disable via environment variables |
-
----
-
-## Vault Policies
-
-### Application Policy (Read-Only)
-
+**Application (token read only):**
 ```hcl
-path "skyflow/creds/*" {
-    capabilities = ["read"]
+path "skyflow/+/creds/*" {
+  capabilities = ["read"]
 }
 ```
 
-### Admin Policy (Full Access)
-
+**Admin (full access):**
 ```hcl
-# Configuration management
-path "skyflow/config" {
-    capabilities = ["create", "read", "update", "delete"]
+path "skyflow/+/config" {
+  capabilities = ["create", "read", "update", "delete"]
 }
+path "skyflow/+/roles/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+path "skyflow/+/creds/*" {
+  capabilities = ["read"]
+}
+path "skyflow/+/health" {
+  capabilities = ["read"]
+}
+```
 
-# Role management
-path "skyflow/roles/*" {
-    capabilities = ["create", "read", "update", "delete", "list"]
-}
+### Incident Response
 
-# Token generation
-path "skyflow/creds/*" {
-    capabilities = ["read"]
-}
-
-# Health and metrics
-path "skyflow/health" {
-    capabilities = ["read"]
-}
-path "skyflow/metrics" {
-    capabilities = ["read"]
-}
+**Credential compromise:**
+```bash
+vault delete skyflow/insurance/config   # Remove immediately
+# Rotate in Skyflow console
+vault write skyflow/insurance/config credentials_json='...'  # Reconfigure
 ```
 
 ---
 
-## Operational Guidelines
+## Testing
 
-### Deployment Checklist
-
-- [ ] Vault running with TLS enabled
-- [ ] Audit backend enabled and monitored
-- [ ] Least-privilege policies applied
-- [ ] Network segmentation in place
-- [ ] Telemetry configured for observability
-
-### Configuration Checklist
-
-- [ ] Credentials stored via seal-wrap
-- [ ] Appropriate TTLs configured
-- [ ] Circuit breaker configured
-- [ ] Telemetry endpoints configured
-
-### Using Tokens in Applications
+### Run Tests
 
 ```bash
-# Retrieve token
-TOKEN_RESPONSE=$(vault read -format=json skyflow/creds/my-app)
-ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.data.access_token')
+# All tests
+go test ./... -v
 
-# Use token with Skyflow API
-curl -H "Authorization: Bearer $ACCESS_TOKEN" \
-     https://api.skyflowapis.com/v1/vaults/abc123/records
+# With coverage
+go test ./... -cover
+
+# Coverage report
+go test ./... -coverprofile=coverage.out
+go tool cover -html=coverage.out
+
+# Race detection
+go test ./... -race
+
+# Integration (requires credentials)
+TEST_MODE=dev go test ./test/... -v
 ```
 
-### Credential Rotation
+### Test Structure
 
-```bash
-# Update configuration with new credentials
-vault write skyflow/config \
-    credentials_json='{"clientID":"new-...","privateKey":"new-..."}'
-
-# Next token request uses new credentials
-vault read skyflow/creds/my-app
 ```
+backend/
+├── backend_test.go       # Factory, lifecycle
+├── config_test.go        # Config validation
+├── role_test.go          # Role CRUD
+├── path_token_test.go    # Token generation
+└── telemetry/
+    ├── config_test.go
+    ├── emitter_test.go
+    └── noop_test.go
+
+test/integration/
+├── setup.go              # Test harness
+└── token_test.go         # E2E token tests
+```
+
+### Coverage Target
+
+| Metric | Goal |
+|--------|------|
+| Line coverage | >80% |
+| Critical paths | 100% |
 
 ---
 
-## Incident Response
+## Error Codes
 
-### Credential Compromise
-
-1. **Immediate**: Delete compromised configuration
-   ```bash
-   vault delete skyflow/config
-   ```
-
-2. **Rotate**: Generate new Skyflow service credentials
-
-3. **Reconfigure**: Update Vault with new credentials
-   ```bash
-   vault write skyflow/config credentials_json='...'
-   ```
-
-4. **Audit**: Review audit logs for unauthorized access
-
-### Suspicious Activity
-
-1. **Monitor**: Check circuit breaker state and metrics
-   ```bash
-   vault read skyflow/health
-   vault read skyflow/metrics
-   ```
-
-2. **Investigate**: Review Vault audit logs
-
-3. **Restrict**: Temporarily disable role if needed
-   ```bash
-   vault delete skyflow/roles/suspicious-role
-   ```
-
----
-
-## Error Responses
-
-### Standard Error Format
-
-```json
-{
-  "errors": ["error message here"]
-}
-```
-
-### Common HTTP Status Codes
-
-| Status Code | Description |
-|-------------|-------------|
-| `200 OK` | Successful read operation |
-| `204 No Content` | Successful write/delete operation |
-| `400 Bad Request` | Invalid request parameters |
-| `404 Not Found` | Resource not found |
-| `500 Internal Server Error` | Server-side error |
-| `503 Service Unavailable` | Skyflow API unreachable |
-
+| Status | Meaning |
+|--------|---------|
+| 200 | Success |
+| 400 | Invalid request |
+| 404 | Role/config not found |
+| 500 | Internal error |
+| 503 | Skyflow API unavailable |

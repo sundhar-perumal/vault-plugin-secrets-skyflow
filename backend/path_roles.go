@@ -33,39 +33,14 @@ func pathRoles(b *skyflowBackend) []*framework.Path {
 					Description: "Name of the role",
 					Required:    true,
 				},
+				"role_ids": {
+					Type:        framework.TypeCommaStringSlice,
+					Description: "Skyflow role IDs for token generation (required)",
+					Required:    true,
+				},
 				"description": {
 					Type:        framework.TypeString,
 					Description: "Description of the role",
-				},
-				"vault_id": {
-					Type:        framework.TypeString,
-					Description: "Skyflow Vault ID for this role",
-				},
-				"account_id": {
-					Type:        framework.TypeString,
-					Description: "Skyflow Account ID for this role",
-				},
-				"scopes": {
-					Type:        framework.TypeCommaStringSlice,
-					Description: "List of scopes for the token",
-				},
-				"ttl": {
-					Type:        framework.TypeDurationSecond,
-					Description: "Token TTL (default: 3600s)",
-					Default:     3600,
-				},
-				"max_ttl": {
-					Type:        framework.TypeDurationSecond,
-					Description: "Maximum token TTL (default: 3600s)",
-					Default:     3600,
-				},
-				"credentials_file_path": {
-					Type:        framework.TypeString,
-					Description: "Override credentials file path for this role",
-				},
-				"credentials_json": {
-					Type:        framework.TypeString,
-					Description: "Override credentials JSON for this role",
 				},
 				"tags": {
 					Type:        framework.TypeCommaStringSlice,
@@ -95,7 +70,7 @@ func pathRoles(b *skyflowBackend) []*framework.Path {
 			},
 
 			HelpSynopsis:    "Manage Skyflow roles.",
-			HelpDescription: "Create and manage roles for Skyflow token generation with specific permissions and settings.",
+			HelpDescription: "Create and manage roles for Skyflow token generation with specific Skyflow role IDs.",
 		},
 	}
 }
@@ -128,6 +103,11 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse("role name is required"), nil
 	}
 
+	operation := "create"
+	if req.Operation == logical.UpdateOperation {
+		operation = "update"
+	}
+
 	// Load existing role or create new one
 	role := defaultRole(name)
 	if req.Operation == logical.UpdateOperation {
@@ -141,38 +121,12 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 	}
 
 	// Update fields from request
+	if roleIDs, ok := data.GetOk("role_ids"); ok {
+		role.RoleIDs = roleIDs.([]string)
+	}
+
 	if desc, ok := data.GetOk("description"); ok {
 		role.Description = desc.(string)
-	}
-
-	if vaultID, ok := data.GetOk("vault_id"); ok {
-		role.VaultID = vaultID.(string)
-	}
-
-	if accountID, ok := data.GetOk("account_id"); ok {
-		role.AccountID = accountID.(string)
-	}
-
-	if scopes, ok := data.GetOk("scopes"); ok {
-		role.Scopes = scopes.([]string)
-	}
-
-	if ttl, ok := data.GetOk("ttl"); ok {
-		role.TTL = time.Duration(ttl.(int)) * time.Second
-	}
-
-	if maxTTL, ok := data.GetOk("max_ttl"); ok {
-		role.MaxTTL = time.Duration(maxTTL.(int)) * time.Second
-	}
-
-	if credPath, ok := data.GetOk("credentials_file_path"); ok {
-		role.CredentialsFilePath = credPath.(string)
-		role.CredentialsJSON = ""
-	}
-
-	if credJSON, ok := data.GetOk("credentials_json"); ok {
-		role.CredentialsJSON = credJSON.(string)
-		role.CredentialsFilePath = ""
 	}
 
 	if tags, ok := data.GetOk("tags"); ok {
@@ -187,6 +141,11 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 	// Save role
 	if err := b.saveRole(ctx, req.Storage, role); err != nil {
 		return nil, err
+	}
+
+	// Emit telemetry
+	if b.emitter != nil {
+		b.emitter.EmitRoleWrite(ctx, name, operation, true)
 	}
 
 	b.Logger().Info("role saved", "name", name, "operation", req.Operation)
@@ -207,28 +166,13 @@ func (b *skyflowBackend) pathRoleRead(ctx context.Context, req *logical.Request,
 		return nil, nil
 	}
 
-	// Don't return sensitive credentials
 	responseData := map[string]interface{}{
 		"name":        role.Name,
+		"role_ids":    role.RoleIDs,
 		"description": role.Description,
-		"vault_id":    role.VaultID,
-		"account_id":  role.AccountID,
-		"scopes":      role.Scopes,
-		"ttl":         int64(role.TTL.Seconds()),
-		"max_ttl":     int64(role.MaxTTL.Seconds()),
 		"tags":        role.Tags,
 		"created_at":  role.CreatedAt.Format(time.RFC3339),
 		"updated_at":  role.UpdatedAt.Format(time.RFC3339),
-	}
-
-	if role.CredentialsFilePath != "" {
-		responseData["credentials_type"] = "file_path"
-		responseData["has_credentials_override"] = true
-	} else if role.CredentialsJSON != "" {
-		responseData["credentials_type"] = "json"
-		responseData["has_credentials_override"] = true
-	} else {
-		responseData["has_credentials_override"] = false
 	}
 
 	return &logical.Response{

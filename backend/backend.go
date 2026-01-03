@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sundhar-perumal/vault-plugin-secrets-skyflow/backend/telemetry"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -18,7 +19,7 @@ define roles that specify token generation parameters.
 
 // Version information - set via ldflags at build time
 var (
-	Version   = "dev"
+	Version   = "v1.0.0"
 	Commit    = "unknown"
 	BuildDate = "unknown"
 )
@@ -27,18 +28,21 @@ var (
 type skyflowBackend struct {
 	*framework.Backend
 
-	// Metrics tracking
-	metrics *metrics
-
-	// Circuit breaker for Skyflow API
-	circuitBreaker *circuitBreaker
+	// Telemetry emitter for traces and metrics
+	emitter *telemetry.Emitter
 }
 
 // Factory returns a new backend as logical.Backend
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
+	// Initialize telemetry emitter (respects ENV=dev for local development)
+	emitter, _ := telemetry.NewEmitter(ctx, telemetry.EmitterConfig{
+		ServiceName:    "skyflow-vault-plugin",
+		ServiceVersion: Version,
+		Environment:    "production",
+	})
+
 	b := &skyflowBackend{
-		metrics:        newMetrics(),
-		circuitBreaker: newCircuitBreaker(5, 60*time.Second),
+		emitter: emitter,
 	}
 
 	b.Backend = &framework.Backend{
@@ -51,7 +55,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			pathRoles(b),
 			pathToken(b),
 			pathHealth(b),
-			pathMetrics(b),
 		),
 
 		PathsSpecial: &logical.Paths{
@@ -80,31 +83,10 @@ func (b *skyflowBackend) invalidate(ctx context.Context, key string) {
 
 // cleanup is called during backend cleanup
 func (b *skyflowBackend) cleanup(ctx context.Context) {
+	if b.emitter != nil {
+		b.emitter.Close(ctx)
+	}
 	b.Logger().Info("backend cleanup complete")
-}
-
-// logContext provides structured logging context
-type logContext struct {
-	operation string
-	role      string
-	duration  time.Duration
-	error     error
-}
-
-// logTokenOperation logs token operations with structured context
-func (b *skyflowBackend) logTokenOperation(ctx logContext) {
-	fields := []interface{}{
-		"operation", ctx.operation,
-		"role", ctx.role,
-		"duration_ms", ctx.duration.Milliseconds(),
-	}
-
-	if ctx.error != nil {
-		fields = append(fields, "error", ctx.error.Error())
-		b.Logger().Error("token operation failed", fields...)
-	} else {
-		b.Logger().Info("token operation successful", fields...)
-	}
 }
 
 // auditEvent represents an audit log entry

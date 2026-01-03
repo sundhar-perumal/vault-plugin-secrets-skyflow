@@ -22,7 +22,7 @@ func pathHealth(b *skyflowBackend) []*framework.Path {
 			},
 
 			HelpSynopsis:    "Health check endpoint.",
-			HelpDescription: "Returns health status of the plugin including configuration and connectivity checks.",
+			HelpDescription: "Returns health status of the plugin including configuration status.",
 		},
 	}
 }
@@ -31,6 +31,7 @@ func pathHealth(b *skyflowBackend) []*framework.Path {
 func (b *skyflowBackend) pathHealthRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	response := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
+		"version":   Version,
 	}
 
 	// Check configuration
@@ -48,28 +49,15 @@ func (b *skyflowBackend) pathHealthRead(ctx context.Context, req *logical.Reques
 		return &logical.Response{Data: response}, nil
 	}
 
+	response["healthy"] = true
 	response["configuration_status"] = "ok"
 
-	// Test token generation with a test role
-	testRole := defaultRole("health-check")
-	start := time.Now()
-
-	_, err = b.generateToken(config, testRole)
-	duration := time.Since(start)
-
-	response["response_time_ms"] = duration.Milliseconds()
-
-	if err != nil {
-		response["healthy"] = false
-		response["connectivity_status"] = "failed"
-		response["error"] = err.Error()
+	// Check credentials type
+	if config.CredentialsFilePath != "" {
+		response["credentials_type"] = "file_path"
 	} else {
-		response["healthy"] = true
-		response["connectivity_status"] = "ok"
+		response["credentials_type"] = "json"
 	}
-
-	// Add circuit breaker status
-	response["circuit_breaker"] = b.circuitBreaker.getStats()
 
 	return &logical.Response{Data: response}, nil
 }

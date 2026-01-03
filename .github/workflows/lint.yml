@@ -1,0 +1,41 @@
+name: Lint
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: 'Go version to use'
+        required: false
+        type: string
+        default: '1.23'
+    secrets:
+      SRE_GIT_READ_TOKEN:
+        required: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: sre-aws-build
+    env:
+      GITHUB_TOKEN: ${{ secrets.SRE_GIT_READ_TOKEN }}
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Git for private modules
+        shell: bash
+        run: |
+          git config --global url."https://${{ secrets.SRE_GIT_READ_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          args: --timeout=5m
+

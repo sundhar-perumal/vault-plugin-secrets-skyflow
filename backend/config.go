@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 	"github.com/hashicorp/vault/sdk/logical"
-	saUtil "github.com/skyflowapi/skyflow-go/serviceaccount/util"
+	"github.com/skyflowapi/skyflow-go/v2/serviceaccount"
+	"github.com/skyflowapi/skyflow-go/v2/utils/common"
+	skyflowError "github.com/skyflowapi/skyflow-go/v2/utils/error"
+	"github.com/skyflowapi/skyflow-go/v2/utils/logger"
 )
 
 // skyflowConfig represents the backend configuration
@@ -15,24 +19,18 @@ type skyflowConfig struct {
 	CredentialsFilePath string `json:"credentials_file_path,omitempty"`
 	CredentialsJSON     string `json:"credentials_json,omitempty"`
 
-	// Advanced settings
-	MaxRetries     int `json:"max_retries"`
-	RequestTimeout int `json:"request_timeout"`
-
 	// Metadata
 	Description string    `json:"description,omitempty"`
+	Tags        []string  `json:"tags,omitempty"`
 	Version     int       `json:"version"`
 	LastUpdated time.Time `json:"last_updated"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
 }
 
 // defaultConfig returns a config with default values
 func defaultConfig() *skyflowConfig {
 	return &skyflowConfig{
-		MaxRetries:     3,
-		RequestTimeout: 30, // 30 seconds
-		Version:        1,
-		LastUpdated:    time.Now(),
+		Version:     1,
+		LastUpdated: time.Now(),
 	}
 }
 
@@ -53,16 +51,6 @@ func (c *skyflowConfig) validate() error {
 		if err := json.Unmarshal([]byte(c.CredentialsJSON), &js); err != nil {
 			return fmt.Errorf("credentials_json must be valid JSON: %w", err)
 		}
-	}
-
-	// Validate retry settings
-	if c.MaxRetries < 0 || c.MaxRetries > 10 {
-		return fmt.Errorf("max_retries must be between 0 and 10")
-	}
-
-	// Validate timeout
-	if c.RequestTimeout < 1 || c.RequestTimeout > 300 {
-		return fmt.Errorf("request_timeout must be between 1 and 300 seconds")
 	}
 
 	return nil
@@ -117,7 +105,6 @@ func (b *skyflowBackend) saveConfigWithHistory(ctx context.Context, s logical.St
 	historyEntry, err := logical.StorageEntryJSON(historyKey, map[string]interface{}{
 		"version":     config.Version,
 		"timestamp":   config.LastUpdated.Format(time.RFC3339),
-		"updated_by":  config.UpdatedBy,
 		"description": config.Description,
 	})
 	if err != nil {
@@ -126,7 +113,6 @@ func (b *skyflowBackend) saveConfigWithHistory(ctx context.Context, s logical.St
 
 	if err := s.Put(ctx, historyEntry); err != nil {
 		b.Logger().Warn("failed to save config history", "error", err)
-		// Don't fail the operation if history save fails
 	}
 
 	return nil
@@ -142,22 +128,34 @@ func (b *skyflowBackend) deleteConfig(ctx context.Context, s logical.Storage) er
 }
 
 // validateCredentials tests that credentials can generate tokens
-func (c *skyflowConfig) validateCredentials() error {
-	var token *saUtil.ResponseToken
-	var err error
+func (c *skyflowConfig) validateCredentials() (returnErr error) {
+	// Recover from SDK panics - defensive measure for unexpected SDK behavior
+	defer func() {
+		if r := recover(); r != nil {
+			returnErr = fmt.Errorf("credential validation panic: %v", r)
+		}
+	}()
+
+	var token *common.TokenResponse
+	var sdkErr *skyflowError.SkyflowError
+
+	opts := common.BearerTokenOptions{LogLevel: logger.DEBUG}
 
 	// Try to generate a token to validate credentials
 	if c.CredentialsFilePath != "" {
-		token, err = saUtil.GenerateBearerToken(c.CredentialsFilePath)
+		if _, statErr := os.Stat(c.CredentialsFilePath); os.IsNotExist(statErr) {
+			return fmt.Errorf("credentials file not found: %s: %w", c.CredentialsFilePath, statErr)
+		}
+		token, sdkErr = serviceaccount.GenerateBearerToken(c.CredentialsFilePath, opts)
 	} else if c.CredentialsJSON != "" {
-		token, err = saUtil.GenerateBearerTokenFromCreds(c.CredentialsJSON)
+		token, sdkErr = serviceaccount.GenerateBearerTokenFromCreds(c.CredentialsJSON, opts)
 	}
 
-	if err != nil {
-		return fmt.Errorf("credential validation failed: %w", err)
+	if sdkErr != nil {
+		return fmt.Errorf("credential validation failed: %w", sdkErr)
 	}
 
-	if token == nil {
+	if token == nil || token.AccessToken == "" {
 		return fmt.Errorf("credential validation failed: no token returned")
 	}
 

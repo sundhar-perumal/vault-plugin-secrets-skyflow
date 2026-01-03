@@ -15,14 +15,6 @@ func TestRole_DefaultRole(t *testing.T) {
 		t.Errorf("expected name 'test-role', got '%s'", role.Name)
 	}
 
-	if role.TTL != 3600*time.Second {
-		t.Errorf("expected default TTL 3600s, got %v", role.TTL)
-	}
-
-	if role.MaxTTL != 3600*time.Second {
-		t.Errorf("expected default MaxTTL 3600s, got %v", role.MaxTTL)
-	}
-
 	if role.CreatedAt.IsZero() {
 		t.Error("expected CreatedAt to be set")
 	}
@@ -43,81 +35,52 @@ func TestRole_Validate(t *testing.T) {
 			name: "Valid role",
 			role: &skyflowRole{
 				Name:    "test-role",
-				TTL:     3600 * time.Second,
-				MaxTTL:  3600 * time.Second,
-				VaultID: "vault123",
+				RoleIDs: []string{"role-id-1"},
 			},
 			wantError: false,
 		},
 		{
 			name: "Empty name",
 			role: &skyflowRole{
-				Name:   "",
-				TTL:    3600 * time.Second,
-				MaxTTL: 3600 * time.Second,
+				Name:    "",
+				RoleIDs: []string{"role-id-1"},
 			},
 			wantError: true,
 			errorMsg:  "role name is required",
 		},
 		{
-			name: "Negative TTL",
+			name: "Missing role_ids",
 			role: &skyflowRole{
-				Name:   "test-role",
-				TTL:    -1 * time.Second,
-				MaxTTL: 3600 * time.Second,
+				Name: "test-role",
 			},
 			wantError: true,
-			errorMsg:  "ttl must be non-negative",
+			errorMsg:  "role_ids is required",
 		},
 		{
-			name: "Negative MaxTTL",
+			name: "Empty role_ids array",
 			role: &skyflowRole{
-				Name:   "test-role",
-				TTL:    3600 * time.Second,
-				MaxTTL: -1 * time.Second,
+				Name:    "test-role",
+				RoleIDs: []string{},
 			},
 			wantError: true,
-			errorMsg:  "max_ttl must be non-negative",
+			errorMsg:  "role_ids is required",
 		},
 		{
-			name: "TTL exceeds MaxTTL",
+			name: "Multiple role_ids not allowed",
 			role: &skyflowRole{
-				Name:   "test-role",
-				TTL:    7200 * time.Second,
-				MaxTTL: 3600 * time.Second,
+				Name:    "test-role",
+				RoleIDs: []string{"role-id-1", "role-id-2", "role-id-3"},
 			},
 			wantError: true,
-			errorMsg:  "ttl cannot exceed max_ttl",
+			errorMsg:  "only one role_id is supported",
 		},
 		{
-			name: "Both credentials provided",
+			name: "Valid role with description and tags",
 			role: &skyflowRole{
-				Name:                "test-role",
-				TTL:                 3600 * time.Second,
-				MaxTTL:              3600 * time.Second,
-				CredentialsFilePath: "/path/to/creds.json",
-				CredentialsJSON:     `{"key": "value"}`,
-			},
-			wantError: true,
-			errorMsg:  "only one of credentials_file_path or credentials_json can be provided",
-		},
-		{
-			name: "Valid role with file path override",
-			role: &skyflowRole{
-				Name:                "test-role",
-				TTL:                 3600 * time.Second,
-				MaxTTL:              3600 * time.Second,
-				CredentialsFilePath: "/path/to/creds.json",
-			},
-			wantError: false,
-		},
-		{
-			name: "Valid role with JSON override",
-			role: &skyflowRole{
-				Name:            "test-role",
-				TTL:             3600 * time.Second,
-				MaxTTL:          3600 * time.Second,
-				CredentialsJSON: `{"key": "value"}`,
+				Name:        "test-role",
+				RoleIDs:     []string{"role-id-1"},
+				Description: "Test description",
+				Tags:        []string{"tag1", "tag2"},
 			},
 			wantError: false,
 		},
@@ -176,12 +139,8 @@ func TestRole_GetSaveDelete(t *testing.T) {
 	t.Run("Save and get role", func(t *testing.T) {
 		testRole := &skyflowRole{
 			Name:        "test-role",
+			RoleIDs:     []string{"skyflow-role-1", "skyflow-role-2"},
 			Description: "Test role description",
-			VaultID:     "vault123",
-			AccountID:   "account456",
-			Scopes:      []string{"read", "write"},
-			TTL:         1800 * time.Second,
-			MaxTTL:      3600 * time.Second,
 			Tags:        []string{"test", "dev"},
 		}
 
@@ -203,16 +162,16 @@ func TestRole_GetSaveDelete(t *testing.T) {
 			t.Errorf("expected name '%s', got '%s'", testRole.Name, role.Name)
 		}
 
-		if role.VaultID != testRole.VaultID {
-			t.Errorf("expected vault_id '%s', got '%s'", testRole.VaultID, role.VaultID)
+		if len(role.RoleIDs) != len(testRole.RoleIDs) {
+			t.Errorf("expected %d role_ids, got %d", len(testRole.RoleIDs), len(role.RoleIDs))
 		}
 
-		if len(role.Scopes) != len(testRole.Scopes) {
-			t.Errorf("expected %d scopes, got %d", len(testRole.Scopes), len(role.Scopes))
+		if role.Description != testRole.Description {
+			t.Errorf("expected description '%s', got '%s'", testRole.Description, role.Description)
 		}
 
-		if role.TTL != testRole.TTL {
-			t.Errorf("expected TTL %v, got %v", testRole.TTL, role.TTL)
+		if len(role.Tags) != len(testRole.Tags) {
+			t.Errorf("expected %d tags, got %d", len(testRole.Tags), len(role.Tags))
 		}
 	})
 
@@ -269,7 +228,10 @@ func TestRole_ListRoles(t *testing.T) {
 	t.Run("List multiple roles", func(t *testing.T) {
 		// Save some roles
 		for _, name := range []string{"role1", "role2", "role3"} {
-			role := defaultRole(name)
+			role := &skyflowRole{
+				Name:    name,
+				RoleIDs: []string{"role-id-1"},
+			}
 			if err := backend.saveRole(ctx, storage, role); err != nil {
 				t.Fatalf("failed to save role %s: %v", name, err)
 			}
@@ -303,10 +265,13 @@ func TestRole_UpdateTimestamp(t *testing.T) {
 
 	backend := b.(*skyflowBackend)
 
-	role := defaultRole("timestamp-test")
+	role := &skyflowRole{
+		Name:    "timestamp-test",
+		RoleIDs: []string{"role-id-1"},
+	}
 	originalUpdatedAt := role.UpdatedAt
 
-	// Wait a bit and save again
+	// Wait a bit and save
 	time.Sleep(10 * time.Millisecond)
 
 	err = backend.saveRole(ctx, storage, role)

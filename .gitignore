@@ -31,6 +31,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-
-# scripts
-scripts
+# Skyflow credentials (anywhere in repo)
+skyflow*.json
+test/integration/*.json
+examples/**/*.json
+.vscode/

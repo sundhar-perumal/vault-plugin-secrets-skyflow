@@ -64,7 +64,7 @@ func TestBackend_Cleanup(t *testing.T) {
 	backend.cleanup(context.Background())
 }
 
-func TestBackend_Metrics(t *testing.T) {
+func TestBackend_AuditLog(t *testing.T) {
 	config := &logical.BackendConfig{
 		Logger: nil,
 		System: &logical.StaticSystemView{},
@@ -77,29 +77,24 @@ func TestBackend_Metrics(t *testing.T) {
 
 	backend := b.(*skyflowBackend)
 
-	t.Run("Initial metrics", func(t *testing.T) {
-		stats := backend.metrics.getStats()
-
-		if stats["total_requests"].(uint64) != 0 {
-			t.Errorf("expected 0 total requests, got %v", stats["total_requests"])
-		}
-
-		if stats["token_generations"].(uint64) != 0 {
-			t.Errorf("expected 0 token generations, got %v", stats["token_generations"])
-		}
-	})
-
-	t.Run("Reset metrics", func(t *testing.T) {
-		backend.metrics.reset()
-
-		stats := backend.metrics.getStats()
-		if stats["total_requests"].(uint64) != 0 {
-			t.Errorf("expected 0 total requests after reset, got %v", stats["total_requests"])
-		}
+	// Should not panic
+	backend.auditLog(auditEvent{
+		Operation: "test",
+		Role:      "test-role",
+		Success:   true,
+		Duration:  100,
+		ClientIP:  "127.0.0.1",
 	})
 }
 
-func TestBackend_CircuitBreaker(t *testing.T) {
+func TestBackend_Version(t *testing.T) {
+	// Version should have v prefix for Vault compatibility
+	if Version[0] != 'v' {
+		t.Errorf("Version should start with 'v', got '%s'", Version)
+	}
+}
+
+func TestBackend_Emitter(t *testing.T) {
 	config := &logical.BackendConfig{
 		Logger: nil,
 		System: &logical.StaticSystemView{},
@@ -112,31 +107,8 @@ func TestBackend_CircuitBreaker(t *testing.T) {
 
 	backend := b.(*skyflowBackend)
 
-	t.Run("Initial state", func(t *testing.T) {
-		state := backend.circuitBreaker.getState()
-		if state != "closed" {
-			t.Errorf("expected initial state 'closed', got '%s'", state)
-		}
-	})
-
-	t.Run("Reset circuit breaker", func(t *testing.T) {
-		backend.circuitBreaker.reset()
-
-		state := backend.circuitBreaker.getState()
-		if state != "closed" {
-			t.Errorf("expected state 'closed' after reset, got '%s'", state)
-		}
-	})
-
-	t.Run("Get stats", func(t *testing.T) {
-		stats := backend.circuitBreaker.getStats()
-
-		if stats["state"] != "closed" {
-			t.Errorf("expected state 'closed', got '%s'", stats["state"])
-		}
-
-		if stats["failures"].(int) != 0 {
-			t.Errorf("expected 0 failures, got %v", stats["failures"])
-		}
-	})
+	// Should have emitter initialized
+	if backend.emitter == nil {
+		t.Error("emitter should not be nil")
+	}
 }

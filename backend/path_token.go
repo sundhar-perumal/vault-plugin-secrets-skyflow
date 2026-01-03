@@ -3,11 +3,14 @@ package backend
 import (
 	"context"
 	"fmt"
-	"math"
+	"os"
 	"time"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
-	saUtil "github.com/skyflowapi/skyflow-go/serviceaccount/util"
+	"github.com/skyflowapi/skyflow-go/v2/serviceaccount"
+	"github.com/skyflowapi/skyflow-go/v2/utils/common"
+	skyflowError "github.com/skyflowapi/skyflow-go/v2/utils/error"
+	"github.com/skyflowapi/skyflow-go/v2/utils/logger"
 )
 
 // pathToken returns the path configuration for token generation
@@ -21,6 +24,10 @@ func pathToken(b *skyflowBackend) []*framework.Path {
 					Type:        framework.TypeString,
 					Description: "Name of the role",
 					Required:    true,
+				},
+				"ctx": {
+					Type:        framework.TypeString,
+					Description: "Context data to include in the token (optional)",
 				},
 			},
 
@@ -42,6 +49,18 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 	start := time.Now()
 	roleName := data.Get("name").(string)
 
+	// Get optional context data
+	ctxData := ""
+	if val, ok := data.GetOk("ctx"); ok {
+		ctxData = val.(string)
+	}
+
+	// Start telemetry span
+	if b.emitter != nil {
+		ctx = b.emitter.EmitTokenRequest(ctx, roleName)
+		defer b.emitter.EndTokenSpan(ctx)
+	}
+
 	// Get role
 	role, err := b.getRole(ctx, req.Storage, roleName)
 	if err != nil {
@@ -62,11 +81,15 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse("backend not configured"), nil
 	}
 
-	// Generate token
-	token, err := b.generateTokenWithTimeout(ctx, config, role)
-	if err != nil {
-		duration := time.Since(start)
-		b.metrics.recordTokenGeneration(duration, err)
+	// Generate token using config credentials and role's Skyflow role IDs
+	token, tokenErr := b.generateToken(config, role, ctxData)
+	duration := time.Since(start)
+
+	if tokenErr != nil {
+		// Record telemetry failure
+		if b.emitter != nil {
+			b.emitter.EmitTokenFailure(ctx, roleName, tokenErr, duration)
+		}
 
 		// Audit log
 		b.auditLog(auditEvent{
@@ -76,21 +99,16 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 			Success:   false,
 			Duration:  duration.Milliseconds(),
 			ClientIP:  req.Connection.RemoteAddr,
-			Error:     err.Error(),
+			Error:     tokenErr.Error(),
 		})
 
-		return logical.ErrorResponse("failed to generate token: %v", err), nil
+		return logical.ErrorResponse("failed to generate token: %v", tokenErr), nil
 	}
 
-	duration := time.Since(start)
-	b.metrics.recordTokenGeneration(duration, nil)
-
-	// Structured logging
-	b.logTokenOperation(logContext{
-		operation: "token_generate",
-		role:      roleName,
-		duration:  duration,
-	})
+	// Record telemetry success
+	if b.emitter != nil {
+		b.emitter.EmitTokenSuccess(ctx, roleName, duration)
+	}
 
 	// Audit log
 	b.auditLog(auditEvent{
@@ -112,88 +130,42 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 	}, nil
 }
 
-// generateTokenWithTimeout generates a token with context timeout
-func (b *skyflowBackend) generateTokenWithTimeout(ctx context.Context, config *skyflowConfig, role *skyflowRole) (*saUtil.ResponseToken, error) {
-	timeout := time.Duration(config.RequestTimeout) * time.Second
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Channel for result
-	resultChan := make(chan struct {
-		token *saUtil.ResponseToken
-		err   error
-	}, 1)
-
-	go func() {
-		token, err := b.generateToken(config, role)
-		resultChan <- struct {
-			token *saUtil.ResponseToken
-			err   error
-		}{token, err}
+// generateToken generates a Skyflow token using config credentials and role's Skyflow role IDs
+func (b *skyflowBackend) generateToken(config *skyflowConfig, role *skyflowRole, ctxData string) (token *common.TokenResponse, returnErr error) {
+	// Recover from SDK panics - defensive measure
+	defer func() {
+		if r := recover(); r != nil {
+			returnErr = fmt.Errorf("token generation panic: %v", r)
+		}
 	}()
 
-	select {
-	case result := <-resultChan:
-		return result.token, result.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("token generation timeout after %v: %w", timeout, ctx.Err())
+	var sdkErr *skyflowError.SkyflowError
+
+	// Use role's Skyflow role IDs for scoped token generation
+	opts := common.BearerTokenOptions{
+		LogLevel: logger.DEBUG,
+		RoleIDs:  role.RoleIDs,
+		Ctx:      ctxData,
 	}
-}
 
-// generateToken generates a new Skyflow token with retry logic
-func (b *skyflowBackend) generateToken(config *skyflowConfig, role *skyflowRole) (*saUtil.ResponseToken, error) {
-	var token *saUtil.ResponseToken
-	var lastErr error
-
-	maxRetries := config.MaxRetries
-
-	// Execute with circuit breaker
-	err := b.circuitBreaker.call(func() error {
-		// Retry loop with exponential backoff
-		for attempt := 0; attempt <= maxRetries; attempt++ {
-			// Determine which credentials to use
-			if role.CredentialsFilePath != "" {
-				token, lastErr = saUtil.GenerateBearerToken(role.CredentialsFilePath)
-			} else if role.CredentialsJSON != "" {
-				token, lastErr = saUtil.GenerateBearerTokenFromCreds(role.CredentialsJSON)
-			} else if config.CredentialsFilePath != "" {
-				token, lastErr = saUtil.GenerateBearerToken(config.CredentialsFilePath)
-			} else if config.CredentialsJSON != "" {
-				token, lastErr = saUtil.GenerateBearerTokenFromCreds(config.CredentialsJSON)
-			} else {
-				return fmt.Errorf("no credentials configured")
-			}
-
-			// Success case
-			if lastErr == nil && token != nil {
-				return nil
-			}
-
-			// Log the error
-			b.Logger().Warn("token generation attempt failed",
-				"attempt", attempt+1,
-				"max_retries", maxRetries,
-				"error", lastErr,
-			)
-
-			// Don't retry on final attempt
-			if attempt < maxRetries {
-				// Exponential backoff: 1s, 2s, 4s, 8s...
-				backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-				time.Sleep(backoff)
-			}
+	// Use config credentials (file path or JSON)
+	if config.CredentialsFilePath != "" {
+		if _, statErr := os.Stat(config.CredentialsFilePath); os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("credentials file not found: %s: %w", config.CredentialsFilePath, statErr)
 		}
+		token, sdkErr = serviceaccount.GenerateBearerToken(config.CredentialsFilePath, opts)
+	} else if config.CredentialsJSON != "" {
+		token, sdkErr = serviceaccount.GenerateBearerTokenFromCreds(config.CredentialsJSON, opts)
+	} else {
+		return nil, fmt.Errorf("no credentials configured")
+	}
 
-		// All retries exhausted
-		if lastErr != nil {
-			return fmt.Errorf("failed to generate bearer token after %d attempts: %w", maxRetries+1, lastErr)
-		}
+	if sdkErr != nil {
+		return nil, fmt.Errorf("failed to generate bearer token: %w", sdkErr)
+	}
 
-		return fmt.Errorf("failed to generate bearer token: no token returned after %d attempts", maxRetries+1)
-	})
-
-	if err != nil {
-		return nil, err
+	if token == nil || token.AccessToken == "" {
+		return nil, fmt.Errorf("token generation returned empty token")
 	}
 
 	return token, nil

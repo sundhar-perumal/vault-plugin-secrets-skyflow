@@ -12,7 +12,7 @@ import (
 
 // Version information - injected via ldflags at build time
 var (
-	Version   = "dev"
+	Version   = "v1.0.0"
 	Commit    = "unknown"
 	BuildDate = "unknown"
 )
@@ -24,7 +24,7 @@ func main() {
 	backend.BuildDate = BuildDate
 
 	apiClientMeta := &api.PluginAPIClientMeta{}
-	flags := apiClientMeta.FlagSet() 
+	flags := apiClientMeta.FlagSet()
 	flags.Parse(os.Args[1:])
 
 	tlsConfig := apiClientMeta.GetTLSConfig()

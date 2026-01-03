@@ -13,18 +13,8 @@ type skyflowRole struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 
-	// Skyflow specific settings
-	VaultID   string   `json:"vault_id,omitempty"`
-	AccountID string   `json:"account_id,omitempty"`
-	Scopes    []string `json:"scopes,omitempty"`
-
-	// Token settings
-	TTL    time.Duration `json:"ttl"`
-	MaxTTL time.Duration `json:"max_ttl"`
-
-	// Credential override (optional)
-	CredentialsFilePath string `json:"credentials_file_path,omitempty"`
-	CredentialsJSON     string `json:"credentials_json,omitempty"`
+	// Skyflow role IDs (mandatory) - passed to SDK for token generation
+	RoleIDs []string `json:"role_ids"`
 
 	// Metadata
 	Tags      []string  `json:"tags,omitempty"`
@@ -37,8 +27,6 @@ func defaultRole(name string) *skyflowRole {
 	now := time.Now()
 	return &skyflowRole{
 		Name:      name,
-		TTL:       3600 * time.Second, // 1 hour
-		MaxTTL:    3600 * time.Second, // 1 hour
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -50,22 +38,12 @@ func (r *skyflowRole) validate() error {
 		return fmt.Errorf("role name is required")
 	}
 
-	// Validate TTL
-	if r.TTL < 0 {
-		return fmt.Errorf("ttl must be non-negative")
+	// Role IDs - exactly one required (future: may support multiple)
+	if len(r.RoleIDs) == 0 {
+		return fmt.Errorf("role_ids is required")
 	}
-
-	if r.MaxTTL < 0 {
-		return fmt.Errorf("max_ttl must be non-negative")
-	}
-
-	if r.MaxTTL > 0 && r.TTL > r.MaxTTL {
-		return fmt.Errorf("ttl cannot exceed max_ttl")
-	}
-
-	// If credentials are provided at role level, validate them
-	if r.CredentialsFilePath != "" && r.CredentialsJSON != "" {
-		return fmt.Errorf("only one of credentials_file_path or credentials_json can be provided")
+	if len(r.RoleIDs) > 1 {
+		return fmt.Errorf("only one role_id is supported. for multiple roles please contact plugin admin")
 	}
 
 	return nil

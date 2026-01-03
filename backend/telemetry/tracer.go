@@ -59,7 +59,7 @@ func NewTracerProvider(ctx context.Context, config *Config) (*TracerProvider, er
 	// Build resource with service information
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(config.ServiceName),
-		semconv.ServiceVersion("1.0.0"),
+		semconv.ServiceVersion(config.ServiceVersion),
 		attribute.String("environment", config.Environment),
 	}
 

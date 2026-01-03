@@ -18,9 +18,10 @@ type Emitter struct {
 
 // EmitterConfig configures the Emitter
 type EmitterConfig struct {
-	Config      *Config
-	ServiceName string
-	Environment string
+	Config         *Config
+	ServiceName    string
+	ServiceVersion string
+	Environment    string
 }
 
 // NewEmitter creates a new Emitter with configuration
@@ -33,6 +34,9 @@ func NewEmitter(ctx context.Context, config EmitterConfig) (*Emitter, error) {
 	serviceName := config.ServiceName
 	if serviceName == "" {
 		serviceName = cfg.ServiceName
+	}
+	if config.ServiceVersion != "" {
+		cfg.ServiceVersion = config.ServiceVersion
 	}
 	environment := config.Environment
 	if environment == "" {

@@ -10,16 +10,12 @@ import (
 func TestConfig_DefaultConfig(t *testing.T) {
 	cfg := defaultConfig()
 
-	if cfg.MaxRetries != 3 {
-		t.Errorf("expected default max_retries 3, got %d", cfg.MaxRetries)
-	}
-
-	if cfg.RequestTimeout != 30 {
-		t.Errorf("expected default request_timeout 30, got %d", cfg.RequestTimeout)
-	}
-
 	if cfg.Version != 1 {
 		t.Errorf("expected default version 1, got %d", cfg.Version)
+	}
+
+	if cfg.LastUpdated.IsZero() {
+		t.Error("expected LastUpdated to be set")
 	}
 }
 
@@ -34,8 +30,6 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Valid config with file path",
 			config: &skyflowConfig{
 				CredentialsFilePath: "/path/to/creds.json",
-				MaxRetries:          3,
-				RequestTimeout:      30,
 			},
 			wantError: false,
 		},
@@ -43,17 +37,12 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Valid config with JSON",
 			config: &skyflowConfig{
 				CredentialsJSON: `{"key": "value"}`,
-				MaxRetries:      3,
-				RequestTimeout:  30,
 			},
 			wantError: false,
 		},
 		{
-			name: "No credentials",
-			config: &skyflowConfig{
-				MaxRetries:     3,
-				RequestTimeout: 30,
-			},
+			name:      "No credentials",
+			config:    &skyflowConfig{},
 			wantError: true,
 			errorMsg:  "either credentials_file_path or credentials_json must be provided",
 		},
@@ -62,8 +51,6 @@ func TestConfig_Validate(t *testing.T) {
 			config: &skyflowConfig{
 				CredentialsFilePath: "/path/to/creds.json",
 				CredentialsJSON:     `{"key": "value"}`,
-				MaxRetries:          3,
-				RequestTimeout:      30,
 			},
 			wantError: true,
 			errorMsg:  "only one of credentials_file_path or credentials_json can be provided",
@@ -72,51 +59,9 @@ func TestConfig_Validate(t *testing.T) {
 			name: "Invalid JSON",
 			config: &skyflowConfig{
 				CredentialsJSON: `{invalid json}`,
-				MaxRetries:      3,
-				RequestTimeout:  30,
 			},
 			wantError: true,
 			errorMsg:  "credentials_json must be valid JSON",
-		},
-		{
-			name: "Negative max retries",
-			config: &skyflowConfig{
-				CredentialsFilePath: "/path/to/creds.json",
-				MaxRetries:          -1,
-				RequestTimeout:      30,
-			},
-			wantError: true,
-			errorMsg:  "max_retries must be between 0 and 10",
-		},
-		{
-			name: "Max retries too high",
-			config: &skyflowConfig{
-				CredentialsFilePath: "/path/to/creds.json",
-				MaxRetries:          11,
-				RequestTimeout:      30,
-			},
-			wantError: true,
-			errorMsg:  "max_retries must be between 0 and 10",
-		},
-		{
-			name: "Request timeout too low",
-			config: &skyflowConfig{
-				CredentialsFilePath: "/path/to/creds.json",
-				MaxRetries:          3,
-				RequestTimeout:      0,
-			},
-			wantError: true,
-			errorMsg:  "request_timeout must be between 1 and 300 seconds",
-		},
-		{
-			name: "Request timeout too high",
-			config: &skyflowConfig{
-				CredentialsFilePath: "/path/to/creds.json",
-				MaxRetries:          3,
-				RequestTimeout:      301,
-			},
-			wantError: true,
-			errorMsg:  "request_timeout must be between 1 and 300 seconds",
 		},
 	}
 
@@ -166,8 +111,6 @@ func TestConfig_GetSaveDelete(t *testing.T) {
 	t.Run("Save and get config", func(t *testing.T) {
 		testConfig := &skyflowConfig{
 			CredentialsFilePath: "/test/path.json",
-			MaxRetries:          5,
-			RequestTimeout:      60,
 			Description:         "Test config",
 		}
 
@@ -249,8 +192,6 @@ func TestConfig_JSONValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &skyflowConfig{
 				CredentialsJSON: tt.json,
-				MaxRetries:      3,
-				RequestTimeout:  30,
 			}
 
 			err := cfg.validate()
@@ -262,4 +203,59 @@ func TestConfig_JSONValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfig_ValidateCredentials(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *skyflowConfig
+	}{
+		{
+			name: "Non-existent file path",
+			config: &skyflowConfig{
+				CredentialsFilePath: "/non/existent/file.json",
+			},
+		},
+		{
+			name: "Invalid JSON credentials",
+			config: &skyflowConfig{
+				CredentialsJSON: `{"invalid": "credentials"}`,
+			},
+		},
+		{
+			name: "Empty JSON credentials",
+			config: &skyflowConfig{
+				CredentialsJSON: `{}`,
+			},
+		},
+		{
+			name: "Malformed credentials structure",
+			config: &skyflowConfig{
+				CredentialsJSON: `{"clientID": "", "privateKey": ""}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// This should NOT panic, but return an error gracefully
+			err := tt.config.validateCredentials()
+			if err == nil {
+				t.Error("expected error for invalid credentials, got nil")
+			}
+			t.Logf("Got expected error: %v", err)
+		})
+	}
+}
+
+func TestConfig_ValidateCredentials_NoCredentials(t *testing.T) {
+	// Test with no credentials set - should return error without panic
+	config := &skyflowConfig{}
+
+	err := config.validateCredentials()
+	// With no credentials, token will be nil and should return error
+	if err == nil {
+		t.Error("expected error when no credentials provided")
+	}
+	t.Logf("Got expected error: %v", err)
 }

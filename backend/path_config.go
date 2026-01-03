@@ -23,19 +23,13 @@ func pathConfig(b *skyflowBackend) []*framework.Path {
 					Type:        framework.TypeString,
 					Description: "Skyflow service account credentials as JSON string",
 				},
-				"max_retries": {
-					Type:        framework.TypeInt,
-					Description: "Maximum number of retry attempts for Skyflow API calls (default: 3)",
-					Default:     3,
-				},
-				"request_timeout": {
-					Type:        framework.TypeInt,
-					Description: "Request timeout in seconds (default: 30)",
-					Default:     30,
-				},
 				"description": {
 					Type:        framework.TypeString,
 					Description: "Description of this Skyflow configuration",
+				},
+				"tags": {
+					Type:        framework.TypeCommaStringSlice,
+					Description: "Tags for organizing configurations",
 				},
 				"validate_credentials": {
 					Type:        framework.TypeBool,
@@ -66,7 +60,7 @@ func pathConfig(b *skyflowBackend) []*framework.Path {
 			},
 
 			HelpSynopsis:    "Configure the Skyflow secrets engine.",
-			HelpDescription: "Configure credentials and settings for Skyflow token generation.",
+			HelpDescription: "Configure credentials for Skyflow token generation.",
 		},
 	}
 }
@@ -83,6 +77,11 @@ func (b *skyflowBackend) pathConfigExistenceCheck(ctx context.Context, req *logi
 
 // pathConfigWrite handles create and update operations for config
 func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	operation := "create"
+	if req.Operation == logical.UpdateOperation {
+		operation = "update"
+	}
+
 	config := defaultConfig()
 
 	// Load existing config if updating
@@ -107,16 +106,12 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 		config.CredentialsFilePath = "" // Clear file path if JSON is set
 	}
 
-	if maxRetries, ok := data.GetOk("max_retries"); ok {
-		config.MaxRetries = maxRetries.(int)
-	}
-
-	if timeout, ok := data.GetOk("request_timeout"); ok {
-		config.RequestTimeout = timeout.(int)
-	}
-
 	if desc, ok := data.GetOk("description"); ok {
 		config.Description = desc.(string)
+	}
+
+	if tags, ok := data.GetOk("tags"); ok {
+		config.Tags = tags.([]string)
 	}
 
 	// Validate configuration
@@ -143,8 +138,10 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 		return nil, err
 	}
 
-	// Reset circuit breaker
-	b.circuitBreaker.reset()
+	// Emit telemetry
+	if b.emitter != nil {
+		b.emitter.EmitConfigWrite(ctx, operation, true)
+	}
 
 	b.Logger().Info("configuration updated",
 		"operation", req.Operation,
@@ -168,9 +165,8 @@ func (b *skyflowBackend) pathConfigRead(ctx context.Context, req *logical.Reques
 	// Don't return sensitive credentials, only metadata
 	responseData := map[string]interface{}{
 		"credentials_configured": true,
-		"max_retries":            config.MaxRetries,
-		"request_timeout":        config.RequestTimeout,
 		"description":            config.Description,
+		"tags":                   config.Tags,
 		"version":                config.Version,
 		"last_updated":           config.LastUpdated.Format(time.RFC3339),
 	}
@@ -192,9 +188,6 @@ func (b *skyflowBackend) pathConfigDelete(ctx context.Context, req *logical.Requ
 	if err := b.deleteConfig(ctx, req.Storage); err != nil {
 		return nil, err
 	}
-
-	// Reset circuit breaker
-	b.circuitBreaker.reset()
 
 	b.Logger().Info("configuration deleted")
 

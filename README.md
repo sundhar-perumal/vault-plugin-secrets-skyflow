@@ -49,10 +49,19 @@ Applications call Vault, Vault calls Skyflow, and Skyflow returns scoped access 
 
 ```mermaid
 flowchart LR
-	A[Order/Purchase/Payment Service] --> B[Vault Path<br/>skyflow/<mount>/creds/<role>]
-	B --> C[Skyflow Token API]
-	B --> D[Seal-wrapped config/roles]
-	C --> E[Short-lived bearer token]
+	subgraph "Source Org"
+		A[Order/Purchase/Payment Service]
+		B[Vault Path<br/>skyflow/<mount>/creds/<role>]
+		D[Seal-wrapped config/roles]
+		E[Short-lived bearer token]
+	end
+	subgraph "Skyflow Org"
+		C[Skyflow Token API]
+	end
+	A --> B
+	B --> C
+	B --> D
+	C --> E
 	E --> A
 ```
 

@@ -172,4 +172,4 @@ func readCredentialsFile(t *testing.T, path string) string {
 
 	return string(data)
 }
-
+

@@ -29,6 +29,10 @@ func pathHealth(b *skyflowBackend) []*framework.Path {
 
 // pathHealthRead performs health checks
 func (b *skyflowBackend) pathHealthRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	traces := b.traces()
+	ctx, span := traces.StartHealthCheck(ctx)
+	defer span.End()
+
 	response := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"version":   Version,
@@ -40,12 +44,26 @@ func (b *skyflowBackend) pathHealthRead(ctx context.Context, req *logical.Reques
 		response["healthy"] = false
 		response["error"] = "failed to load configuration"
 		response["details"] = err.Error()
+
+		traces.RecordHealthCheckError(span, err)
+
+		if m := b.metrics(); m != nil {
+			m.RecordHealthCheck(ctx, "unhealthy")
+		}
+
 		return &logical.Response{Data: response}, nil
 	}
 
 	if config == nil {
 		response["healthy"] = false
 		response["error"] = "backend not configured"
+
+		traces.RecordHealthCheckNotConfigured(span)
+
+		if m := b.metrics(); m != nil {
+			m.RecordHealthCheck(ctx, "unhealthy")
+		}
+
 		return &logical.Response{Data: response}, nil
 	}
 
@@ -57,6 +75,12 @@ func (b *skyflowBackend) pathHealthRead(ctx context.Context, req *logical.Reques
 		response["credentials_type"] = "file_path"
 	} else {
 		response["credentials_type"] = "json"
+	}
+
+	traces.RecordHealthCheckSuccess(span)
+
+	if m := b.metrics(); m != nil {
+		m.RecordHealthCheck(ctx, "healthy")
 	}
 
 	return &logical.Response{Data: response}, nil

@@ -82,12 +82,17 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 		operation = "update"
 	}
 
+	traces := b.traces()
+	ctx, span := traces.StartConfigWrite(ctx, operation)
+	defer span.End()
+
 	config := defaultConfig()
 
 	// Load existing config if updating
 	if req.Operation == logical.UpdateOperation {
 		existingConfig, err := b.getConfig(ctx, req.Storage)
 		if err != nil {
+			traces.RecordConfigError(span, err)
 			return nil, err
 		}
 		if existingConfig != nil {
@@ -116,6 +121,7 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 
 	// Validate configuration
 	if err := config.validate(); err != nil {
+		traces.RecordConfigErrorWithMessage(span, err.Error())
 		return logical.ErrorResponse("invalid configuration: %s", err.Error()), nil
 	}
 
@@ -128,6 +134,7 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 	if validateCreds {
 		b.Logger().Info("validating credentials")
 		if err := config.validateCredentials(); err != nil {
+			traces.RecordConfigError(span, err)
 			return logical.ErrorResponse("credential validation failed: %s", err.Error()), nil
 		}
 		b.Logger().Info("credentials validated successfully")
@@ -135,13 +142,16 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 
 	// Save configuration with history
 	if err := b.saveConfigWithHistory(ctx, req.Storage, config); err != nil {
+		traces.RecordConfigError(span, err)
 		return nil, err
 	}
 
-	// Emit telemetry
-	if b.emitter != nil {
-		b.emitter.EmitConfigWrite(ctx, operation, true)
+	// Record metrics
+	if m := b.metrics(); m != nil {
+		m.RecordConfigWrite(ctx, operation)
 	}
+
+	traces.RecordConfigUpdated(span)
 
 	b.Logger().Info("configuration updated",
 		"operation", req.Operation,
@@ -153,14 +163,27 @@ func (b *skyflowBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 
 // pathConfigRead handles read operations for config
 func (b *skyflowBackend) pathConfigRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	traces := b.traces()
+	ctx, span := traces.StartConfigRead(ctx)
+	defer span.End()
+
+	// Record metrics
+	if m := b.metrics(); m != nil {
+		m.RecordConfigRead(ctx, string(req.Operation))
+	}
+
 	config, err := b.getConfig(ctx, req.Storage)
 	if err != nil {
+		traces.RecordConfigError(span, err)
 		return nil, err
 	}
 
 	if config == nil {
+		traces.RecordConfigFound(span, false)
 		return nil, nil
 	}
+
+	traces.RecordConfigFound(span, true)
 
 	// Don't return sensitive credentials, only metadata
 	responseData := map[string]interface{}{
@@ -185,10 +208,16 @@ func (b *skyflowBackend) pathConfigRead(ctx context.Context, req *logical.Reques
 
 // pathConfigDelete handles delete operations for config
 func (b *skyflowBackend) pathConfigDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	traces := b.traces()
+	ctx, span := traces.StartConfigWrite(ctx, "delete")
+	defer span.End()
+
 	if err := b.deleteConfig(ctx, req.Storage); err != nil {
+		traces.RecordConfigError(span, err)
 		return nil, err
 	}
 
+	traces.RecordConfigUpdated(span)
 	b.Logger().Info("configuration deleted")
 
 	return nil, nil

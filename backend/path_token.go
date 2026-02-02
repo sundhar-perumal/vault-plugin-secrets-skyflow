@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/skyflowapi/skyflow-go/v2/serviceaccount"
 	"github.com/skyflowapi/skyflow-go/v2/utils/common"
 	skyflowError "github.com/skyflowapi/skyflow-go/v2/utils/error"
 	"github.com/skyflowapi/skyflow-go/v2/utils/logger"
+	"github.com/sundhar-perumal/vault-plugin-secrets-skyflow/backend/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // pathToken returns the path configuration for token generation
@@ -48,6 +52,36 @@ func pathToken(b *skyflowBackend) []*framework.Path {
 func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	start := time.Now()
 	roleName := data.Get("name").(string)
+	traces := b.traces()
+
+	// Debug log: Environment variables for telemetry debugging
+	b.Logger().Debug("token request ENV debug",
+		"role", roleName,
+		"ENV", os.Getenv("ENV"),
+		"TELEMETRY_ENABLED", os.Getenv("TELEMETRY_ENABLED"),
+		"RUNTIME_LOCAL", os.Getenv("RUNTIME_LOCAL"),
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+		"telemetry_providers_nil", b.telemetryProviders == nil,
+		"traces_nil", traces == nil,
+		"traces_enabled", traces != nil && traces.IsEnabled(),
+	)
+
+	// Extract trace context from traceparent header (W3C standard)
+	ctx = telemetry.ExtractTraceContext(ctx, req.Headers)
+
+	// Extract skyflowVaultName from mount point (e.g., "skyflow/order/" -> "order")
+	skyflowVaultName := "unknown"
+	parts := strings.Split(strings.Trim(req.MountPoint, "/"), "/")
+	if len(parts) > 0 {
+		skyflowVaultName = parts[len(parts)-1]
+	}
+
+	// Extract vaultServiceName from header (sent by client)
+	vaultServiceName := "direct"
+	if vals, ok := req.Headers["Application-Source"]; ok && len(vals) > 0 && vals[0] != "" {
+		vaultServiceName = vals[0]
+	}
 
 	// Get optional context data
 	ctxData := ""
@@ -55,43 +89,71 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 		ctxData = val.(string)
 	}
 
-	// Start telemetry span
-	if b.emitter != nil {
-		ctx = b.emitter.EmitTokenRequest(ctx, roleName)
-		defer b.emitter.EndTokenSpan(ctx)
-	}
+	// Start telemetry span (inherits parent span from extracted trace context)
+	ctx, span := traces.StartTokenGenerate(ctx, roleName)
+	defer span.End()
+
+	b.Logger().Debug("token request received", "role", roleName)
 
 	// Get role
 	role, err := b.getRole(ctx, req.Storage, roleName)
 	if err != nil {
+		traces.RecordTokenFailed(span, float64(time.Since(start).Milliseconds()), err)
 		return nil, err
 	}
 
 	if role == nil {
+		traces.RecordTokenFailed(span, float64(time.Since(start).Milliseconds()), fmt.Errorf("role not found"))
 		return logical.ErrorResponse("role %q not found", roleName), nil
 	}
 
 	// Get config
 	config, err := b.getConfig(ctx, req.Storage)
 	if err != nil {
+		traces.RecordTokenFailed(span, float64(time.Since(start).Milliseconds()), err)
 		return nil, err
 	}
 
 	if config == nil {
+		traces.RecordTokenFailed(span, float64(time.Since(start).Milliseconds()), fmt.Errorf("backend not configured"))
 		return logical.ErrorResponse("backend not configured"), nil
 	}
 
+	// Determine credential type for telemetry
+	credentialType := "json"
+	if config.CredentialsFilePath != "" {
+		credentialType = "file_path"
+	}
+
+	// Start inner span for Skyflow SDK authentication
+	ctx, sdkSpan := traces.StartSDKAuth(ctx, roleName, credentialType, len(role.RoleIDs))
+
 	// Generate token using config credentials and role's Skyflow role IDs
+	sdkCallStart := time.Now()
 	token, tokenErr := b.generateToken(config, role, ctxData)
+	sdkCallDuration := time.Since(sdkCallStart)
 	duration := time.Since(start)
+
+	// End SDK auth span
+	if tokenErr != nil {
+		traces.RecordSDKAuthFailed(sdkSpan, float64(sdkCallDuration.Milliseconds()), tokenErr)
+	} else {
+		traces.RecordSDKAuthSuccess(sdkSpan, float64(sdkCallDuration.Milliseconds()))
+	}
+	sdkSpan.End()
 
 	if tokenErr != nil {
 		// Record telemetry failure
-		if b.emitter != nil {
-			b.emitter.EmitTokenFailure(ctx, roleName, tokenErr, duration)
+		traces.RecordTokenFailed(span, float64(duration.Milliseconds()), tokenErr)
+
+		// Record metrics
+		if m := b.metrics(); m != nil {
+			m.RecordTokenGenerate(ctx, roleName, vaultServiceName, skyflowVaultName, float64(duration.Milliseconds()), false)
+			m.RecordTokenError(ctx, roleName, vaultServiceName, skyflowVaultName, "generation_failed")
 		}
 
 		// Audit log
+		traceID := trace.SpanContextFromContext(ctx).TraceID().String()
 		b.auditLog(auditEvent{
 			Timestamp: time.Now(),
 			Operation: "token_generate",
@@ -99,6 +161,7 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 			Success:   false,
 			Duration:  duration.Milliseconds(),
 			ClientIP:  req.Connection.RemoteAddr,
+			TraceID:   traceID,
 			Error:     tokenErr.Error(),
 		})
 
@@ -106,11 +169,16 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 	}
 
 	// Record telemetry success
-	if b.emitter != nil {
-		b.emitter.EmitTokenSuccess(ctx, roleName, duration)
+	traces.RecordTokenGenerated(span, float64(duration.Milliseconds()))
+
+	// Record metrics
+	if m := b.metrics(); m != nil {
+		m.RecordTokenGenerate(ctx, roleName, vaultServiceName, skyflowVaultName, float64(duration.Milliseconds()), true)
+		m.RecordSkyflowSDKCall(ctx, roleName, "success", float64(sdkCallDuration.Milliseconds()))
 	}
 
 	// Audit log
+	traceID := trace.SpanContextFromContext(ctx).TraceID().String()
 	b.auditLog(auditEvent{
 		Timestamp: time.Now(),
 		Operation: "token_generate",
@@ -118,9 +186,10 @@ func (b *skyflowBackend) pathTokenRead(ctx context.Context, req *logical.Request
 		Success:   true,
 		Duration:  duration.Milliseconds(),
 		ClientIP:  req.Connection.RemoteAddr,
+		TraceID:   traceID,
 	})
 
-	b.Logger().Info("token generated", "role", roleName, "duration_ms", duration.Milliseconds())
+	b.Logger().Info("token generated", "role", roleName, "trace_id", traceID, "duration_ms", duration.Milliseconds())
 
 	return &logical.Response{
 		Data: map[string]interface{}{

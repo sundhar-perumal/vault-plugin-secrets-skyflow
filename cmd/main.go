@@ -38,4 +38,4 @@ func main() {
 		logger.Error("plugin shutting down", "error", err)
 		os.Exit(1)
 	}
-}
+}

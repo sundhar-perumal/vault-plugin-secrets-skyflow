@@ -1,252 +1,170 @@
-# Skyflow Vault Plugin - SRE Operations Guide
+# Skyflow Vault Plugin - SRE CI/CD Guide
 
-## Quick Reference
-
-| Item | Value |
-|------|-------|
-| Plugin Name | `skyflow-plugin` |
-| Binary Location | `/etc/vault/plugins/skyflow-plugin` |
-| Required Vault Version | 1.16.0+ |
+CI/CD for this plugin focuses on building reproducible binaries, validating integrations, and promoting releases safely across environments that host the order, purchase, and payment mounts. This guide documents the automation flow and the manual checkpoints required from SREs.
 
 ---
 
-## 1. Build & Install
+## Pipeline Blueprint
 
-```bash
-make build                     # Build plugin
-make install register enable   # Install to Vault
 ```
+┌────────────┐   lint+unit   ┌─────────────┐   integ tests   ┌─────────────┐   package/sign   ┌─────────────┐   deploy
+│  Git push  │ ─────────────▶│ Stage: Lint │ ───────────────▶│ Stage: Test │ ────────────────▶│ Stage: Art  │ ────────────────▶│ Stage: Deploy │
+└────────────┘               └─────────────┘                 └─────────────┘                   └─────────────┘                   └────────────────┘
+                                                                │                                                       │
+                                                                ▼                                                       ▼
+                                                         Coverage + race                                          Dev → Stg → Prod
+```
+
+### Stage Summary
+
+| Stage | Purpose | Blocking Rules |
+|-------|---------|----------------|
+| **Lint** | `golangci-lint run` + formatting checks. | Must be clean; warnings fail the build. |
+| **Unit** | `go test ./... -race -cover`. | Requires >=80% coverage. |
+| **Integration** | `go test ./test/integration -tags=integration`. | Runs only when Skyflow sandbox secrets are available; failures block promotion. |
+| **Artifact** | Produce Linux AMD64 binary + Docker image. Generate SHA256 + SBOM. | SHA mismatch halts pipeline. |
+| **Deploy** | Publish binary to object storage, push Docker image, register plugin in Vault for dev/stg/prod. | Requires manual approval + health check gates. |
 
 ---
 
-## 2. Docker Deployment
+## Build & Test Stages
 
-```bash
-docker build -t skyflow-plugin:v1.0.0 .
-docker run -d -p 8200:8200 skyflow-plugin:v1.0.0
+- **Lint job**
+  - Command: `golangci-lint run --timeout=3m`
+  - Cache the module download directory (`$GOMODCACHE`) to keep runtimes low.
 
-export VAULT_ADDR=http://localhost:8200
-export VAULT_TOKEN=root
-```
+- **Unit test job**
+  - Commands:
+    ```bash
+    go test ./... -race -coverprofile=coverage.out
+    go tool cover -func=coverage.out | tee coverage.txt
+    ```
+  - Upload `coverage.out` as an artifact; pipeline enforces >=80%.
 
----
-
-## 3. Multi-Mount & Multi-App Architecture
-
-```
-vault/
-├── skyflow/insurance/              # Mount: Insurance BU
-│   ├── config                      # Skyflow credentials
-│   └── roles/
-│       ├── producer                # Insurance → writes PII
-│       ├── consumer-admin-portal   # Admin Portal → reads PII
-│       └── consumer-nxt            # NXT App → reads PII
-│
-├── skyflow/lending/                # Mount: Lending BU
-│   ├── config                      # Skyflow credentials
-│   └── roles/
-│       ├── producer                # Lending → writes PII
-│       ├── consumer-admin-portal   # Admin Portal → reads PII
-│       └── consumer-nxt            # NXT App → reads PII
-│
-└── skyflow/clcm/                   # Mount: CLCM BU
-    ├── config                      # Skyflow credentials
-    └── roles/
-        ├── producer                # CLCM → writes PII
-        ├── consumer-insurance      # Insurance App → reads PII
-        ├── consumer-lending        # Lending App → reads PII
-        ├── consumer-portfolio      # Portfolio App → reads PII
-        └── consumer-cns            # CNS App → reads PII
-```
+- **Integration job**
+  - Secrets required: `SKYFLOW_SANDBOX_JSON`, `VAULT_DEV_TOKEN`.
+  - Commands:
+    ```bash
+    VAULT_ADDR=${VAULT_ADDR:-http://127.0.0.1:8200}
+    VAULT_TOKEN=$VAULT_DEV_TOKEN TEST_MODE=integration go test ./test/integration -v
+    ```
+  - Job marked optional for forks but mandatory on protected branches.
 
 ---
 
-## 4. Configuration Commands
+## Artifact Packaging
 
-### Step 1: Register Plugin & Enable Mounts
-
-```bash
-# Register plugin (once)
-SHA256=$(sha256sum /etc/vault/plugins/skyflow-plugin | cut -d' ' -f1)
-vault plugin register -sha256=$SHA256 -command=skyflow-plugin secret skyflow-plugin
-
-# Enable mount paths
-vault secrets enable -path=skyflow/insurance skyflow-plugin
-vault secrets enable -path=skyflow/lending skyflow-plugin
-```
-
-### Step 2: Configure Credentials
-
-```bash
-# Insurance BU
-vault write skyflow/insurance/config \
-  credentials_file_path="/etc/vault/creds/insurance-sa.json" \
-  description="Insurance Skyflow credentials" \
-  tags="production,insurance"
-
-# Lending BU
-vault write skyflow/lending/config \
-  credentials_file_path="/etc/vault/creds/lending-sa.json" \
-  description="Lending Skyflow credentials" \
-  tags="production,lending"
-```
-
-### Step 3: Create Roles
-
-```bash
-# ================================ INSURANCE BU ================================
-
-# Producer (Insurance app writes PII)
-vault write skyflow/insurance/roles/producer \
-  role_ids="skyflow-insurance-write-role" \
-  description="Insurance producer - writes PII" \
-  tags="producer,insurance"
-
-# Consumer: Admin Portal (reads PII)
-vault write skyflow/insurance/roles/consumer-admin-portal \
-  role_ids="skyflow-insurance-admin-read-role" \
-  description="Admin Portal - reads Insurance PII" \
-  tags="consumer,admin-portal,insurance"
-
-# Consumer: NXT (reads PII)
-vault write skyflow/insurance/roles/consumer-nxt \
-  role_ids="skyflow-insurance-nxt-read-role" \
-  description="NXT App - reads Insurance PII" \
-  tags="consumer,nxt,insurance"
-
-# ================================ LENDING BU ================================
-
-# Producer (Lending app writes PII)
-vault write skyflow/lending/roles/producer \
-  role_ids="skyflow-lending-write-role" \
-  description="Lending producer - writes PII" \
-  tags="producer,lending"
-
-# Consumer: Admin Portal (reads PII)
-vault write skyflow/lending/roles/consumer-admin-portal \
-  role_ids="skyflow-lending-admin-read-role" \
-  description="Admin Portal - reads Lending PII" \
-  tags="consumer,admin-portal,lending"
-
-# Consumer: NXT (reads PII)
-vault write skyflow/lending/roles/consumer-nxt \
-  role_ids="skyflow-lending-nxt-read-role" \
-  description="NXT App - reads Lending PII" \
-  tags="consumer,nxt,lending"
-```
-
-### Step 4: Generate Tokens
-
-```bash
-# Insurance - Producer token
-vault read skyflow/insurance/creds/producer
-
-# Insurance - Admin Portal consumer token
-vault read skyflow/insurance/creds/consumer-admin-portal
-
-# Insurance - NXT consumer token
-vault read skyflow/insurance/creds/consumer-nxt
-
-# Lending - Producer token
-vault read skyflow/lending/creds/producer
-
-# Lending - Admin Portal consumer token
-vault read skyflow/lending/creds/consumer-admin-portal
-
-# With context data
-vault read skyflow/insurance/creds/producer ctx="txn:INS-12345"
-```
+1. **Build binary**
+   ```bash
+   make clean build            # outputs bin/skyflow-plugin
+   sha256sum bin/skyflow-plugin > dist/skyflow-plugin.sha256
+   ```
+2. **Container image**
+   ```bash
+   docker build -t registry.example.com/infra/skyflow-plugin:${GIT_SHA} .
+   docker push registry.example.com/infra/skyflow-plugin:${GIT_SHA}
+   ```
+3. **SBOM + signatures**
+   ```bash
+   syft packages bin/skyflow-plugin -o json > dist/skyflow-plugin.sbom.json
+   cosign sign --key azure-kv://vault/skyflow bin/skyflow-plugin
+   ```
+4. **Release bundle**
+   - Upload `bin/skyflow-plugin`, checksum, and SBOM to artifact storage.
+   - Tag git release `vX.Y.Z` only after artifacts replicate.
 
 ---
 
-## 5. Summary Table
+## Deployment Automation
+
+### 1. Dev rollout (order mount)
+
+```bash
+SHA=$(cat dist/skyflow-plugin.sha256 | cut -d' ' -f1)
+
+  -sha256=$SHA \
+  -command="skyflow-plugin" \
+  -env="ENV=dev" \
+  secret skyflow-svc
+
+vault secrets enable -path=skyflow/order skyflow-svc || true
+vault write skyflow/order/config credentials_json=@order-dev-sa.json
+```
+
+Verify: `vault read skyflow/order/health`.
+
+### 2. Staging rollout (purchase mount)
+
+```bash
+vault plugin reload -plugin=skyflow-svc
+vault secrets enable -path=skyflow/purchase skyflow-svc || true
+vault write skyflow/purchase/config credentials_json=@purchase-stg-sa.json
+```
+
+Run smoke tests: `vault read skyflow/purchase/creds/purchase-producer`.
+
+### 3. Production rollout (payment mount)
+
+```bash
+vault plugin reload -plugin=skyflow-svc
+vault secrets enable -path=skyflow/payment skyflow-svc || true
+vault write skyflow/payment/config credentials_file_path="/etc/vault/creds/payment.json"
+```
+
+Post-checks:
+- `vault list skyflow/payment/roles`
+- `vault read skyflow/payment/health`
+- Telemetry: verify traces on OTLP collector (service name `skyflow-plugin`).
+
+Promotion requires two-person approval plus confirmation that the previous environment ran for 24h without errors.
+
+---
+
+## Release Checklist
+
+1. Pipeline green on `main` (lint/unit/integration).
+2. Artifacts signed and stored with matching SHA.
+3. Release notes include:
+   - Commit range
+   - Config/role schema changes
+   - Required Vault version
+4. Dev rollout complete; health endpoint returning 200.
+5. Purchase mount updated in staging; integration smoke tests (`go test ./test/integration -run Purchase`) succeed.
+6. Production CAB approval captured.
+7. Payment mount updated; first token request logged with correct telemetry attributes.
+
+---
+
+## Rollback Plan
+
+- Keep previous binary + checksum for two releases.
+- To revert:
+  ```bash
+  vault plugin register -sha256=$(cat prev.sha256) -command=skyflow-plugin secret skyflow-svc
+  vault plugin reload -plugin=skyflow-svc
+  ```
+- Re-run health checks for order, purchase, payment mounts.
+- Update release log with reason + timeline.
+
+---
+
+## CI/CD Observability
+
+| Signal | Location | Notes |
+|--------|----------|-------|
+| Pipeline metrics | GitHub Actions /build insights | Watch duration and failure rate per job. |
+| Artifact integrity | Artifact storage + SHA file | SHA mismatch triggers alert. |
+| Vault deploy | Vault audit logs | Ensure `plugin reload` + `secrets enable` recorded. |
+| Telemetry | OTLP traces/metrics | Expect attributes `mount=order|purchase|payment`, `role`, `env`. |
+
+Set alerts for:
+- Two consecutive pipeline failures on `main`.
+- Token latency p95 > 400ms after deployment.
+- Missing telemetry for a mount for >30 minutes.
+
+---
+
+Following this runbook keeps the Skyflow secrets plugin release train predictable and auditable while supporting multiple business-critical mounts.
+
 
 | Mount Path | Role | Application | Access |
-|------------|------|-------------|--------|
-| `skyflow/insurance` | `producer` | Insurance | Write |
-| `skyflow/insurance` | `consumer-admin-portal` | Admin Portal | Read |
-| `skyflow/insurance` | `consumer-nxt` | NXT | Read |
-| `skyflow/lending` | `producer` | Lending | Write |
-| `skyflow/lending` | `consumer-admin-portal` | Admin Portal | Read |
-| `skyflow/lending` | `consumer-nxt` | NXT | Read |
-
----
-
-## 6. Common Commands
-
-| Task | Command |
-|------|---------|
-| List mounts | `vault secrets list` &#124; `grep skyflow` |
-| List Insurance roles | `vault list skyflow/insurance/roles` |
-| List Lending roles | `vault list skyflow/lending/roles` |
-| Read role config | `vault read skyflow/insurance/roles/producer` |
-| Health check | `vault read skyflow/insurance/health` |
-| Delete role | `vault delete skyflow/insurance/roles/consumer-nxt` |
-| Disable mount | `vault secrets disable skyflow/insurance` |
-
----
-
-## 7. Environment Variables (Telemetry)
-
-### Master Switch
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `ENV` | Set to `dev` to **disable all telemetry** | - | `ENV=dev` |
-| `TELEMETRY_ENABLED` | Master on/off switch | `true` | `TELEMETRY_ENABLED=false` |
-
-### Example: Production Configuration
-
-```bash
-# Service identity
-export OTEL_SERVICE_NAME=<actual-application-name>
-export SERVICE_NAMESPACE=skyflow-vault-plugin
-export ENV=production
-
-# Enable telemetry
-export TELEMETRY_ENABLED=true
-export TELEMETRY_TRACES_ENABLED=true
-export TELEMETRY_METRICS_ENABLED=true
-
-# OTEL Collector endpoints
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://otel-collector:4318/v1/metrics
-
-```
-
-### Example: Development (Disable Telemetry)
-
-```bash
-export ENV=dev   # This disables all telemetry
-```
-
-### Telemetry Decision Logic
-
-```
-ENV=dev?
-  └─ YES → Telemetry OFF (no traces, no metrics)
-  └─ NO  → Check TELEMETRY_ENABLED
-              └─ false → Telemetry OFF
-              └─ true  → Check individual flags:
-                           ├─ TELEMETRY_TRACES_ENABLED + endpoint → Traces ON
-                           └─ TELEMETRY_METRICS_ENABLED + endpoint → Metrics ON
-```
-
-> **Note:** Traces and metrics require both the `*_ENABLED` flag AND a valid `*_ENDPOINT` to be active.
-
----
-
-## 8. Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Plugin not found | Verify SHA256 matches, re-register plugin |
-| Token generation failed | Check credentials file path and permissions |
-| Role not found | Verify role exists: `vault list skyflow/.../roles` |
-| Connection refused | Check Vault is running and `VAULT_ADDR` is set |
-| Invalid role_ids | Ensure exactly one `role_id` is provided per role |
-
----
-
-**Support:** Contact plugin admin for `role_ids` or credentials configuration issues.
-

@@ -44,8 +44,8 @@ FROM hashicorp/vault:1.16.0
 # Add metadata
 LABEL org.opencontainers.image.title="Skyflow Vault Plugin" \
       org.opencontainers.image.description="HashiCorp Vault plugin for Skyflow token generation" \
-      org.opencontainers.image.vendor="Angel One" \
-      org.opencontainers.image.source="https://github.com/angel-one/go-skyflow-harshicorp-plugin" \
+    org.opencontainers.image.vendor="Community" \
+    org.opencontainers.image.source="https://github.com/<org>/vault-plugin-secrets-skyflow" \
       org.opencontainers.image.version="${VERSION}"
 
 # Copy plugin binary from builder

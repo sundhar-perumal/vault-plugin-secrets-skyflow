@@ -1,74 +1,76 @@
 # Guidelines
 
-API reference, security, and testing for developers.
+Developer-facing reference for the Skyflow secrets plugin. This guide is intentionally scoped to API usage and the testing surface so engineers can build, verify, and ship integrations quickly.
 
 ---
 
 ## API Reference
 
-### Config Endpoint
+All paths shown below assume a mount such as `skyflow/order/`, `skyflow/purchase/`, or `skyflow/payment/`. Replace the mount prefix to match your deployment.
 
-**`POST /skyflow/config`** - Configure backend credentials
+### Configuration
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `credentials_file_path` | string | conditional | Path to SA JSON file |
-| `credentials_json` | string | conditional | SA JSON inline |
-| `description` | string | no | Description |
-| `tags` | []string | no | Organization tags |
-| `validate_credentials` | bool | no | Test credentials (default: true) |
+**`POST {mount}/config`** — Store Skyflow service account credentials for the mount.
 
-> Provide exactly one of `credentials_file_path` or `credentials_json`
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `credentials_file_path` | string | conditional | Absolute path readable by Vault. |
+| `credentials_json` | string | conditional | Inline JSON blob. |
+| `description` | string | no | Free-form docs. |
+| `tags` | []string | no | Use `product:order`, `env:prod`, etc. |
+| `validate_credentials` | bool | no | Defaults to `true`. Set `false` to skip Skyflow validation (not recommended outside dev).
 
-```bash
-vault write skyflow/insurance/config \
-  credentials_file_path="/etc/vault/creds/sa.json" \
-  description="Insurance credentials" \
-  tags="production,insurance"
-```
-
----
-
-### Role Endpoints
-
-**`POST /skyflow/roles/:name`** - Create/update role
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `role_ids` | []string | **yes** | Skyflow role ID (exactly 1) |
-| `description` | string | no | Role description |
-| `tags` | []string | no | Organization tags |
+Exactly one of `credentials_file_path` or `credentials_json` must be supplied.
 
 ```bash
-vault write skyflow/insurance/roles/producer \
-  role_ids="skyflow-role-abc123" \
-  description="Producer role" \
-  tags="producer,insurance"
+vault write skyflow/order/config \
+  credentials_file_path="/etc/vault/creds/order-service.json" \
+  description="Order platform credentials" \
+  tags="product:order,env:prod"
 ```
 
-**`LIST /skyflow/roles`** - List all roles
-**`GET /skyflow/roles/:name`** - Read role
-**`DELETE /skyflow/roles/:name`** - Delete role
+### Roles
 
----
+**`POST {mount}/roles/{name}`** — Create or update a role representing a downstream application (for example, `order-producer`, `purchase-consumer-portal`, `payment-risk-engine`).
 
-### Token Endpoint
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `role_ids` | []string | yes | Supply exactly one Skyflow role ID. |
+| `description` | string | no | Purpose of the role. |
+| `tags` | []string | no | Helpful for auditing and search. |
 
-**`GET /skyflow/creds/:name`** - Generate bearer token
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `ctx` | string | no | Context data for token |
+Additional verbs:
+- **`LIST {mount}/roles`** — Enumerate roles for the mount.
+- **`GET {mount}/roles/{name}`** — Read role definition.
+- **`DELETE {mount}/roles/{name}`** — Remove role (irreversible).
 
 ```bash
-# Basic
-vault read skyflow/insurance/creds/producer
-
-# With context
-vault read skyflow/insurance/creds/producer ctx="user:12345"
+vault write skyflow/payment/roles/payment-risk-engine \
+  role_ids="skyflow-role-risk-001" \
+  description="Risk engine read/write access" \
+  tags="product:payment,app:risk"
 ```
 
-**Response:**
+### Token Issuance
+
+**`GET {mount}/creds/{role}`** — Fetch a short-lived bearer token for the specified role.
+
+Optional query/form field:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `ctx` | string | no | Free-form context passed to Skyflow, e.g., `ctx="order:12345"`.
+
+```bash
+# Order service generating a producer token
+vault read skyflow/order/creds/order-producer
+
+# Payment app attaching context for traceability
+vault read skyflow/payment/creds/payment-risk-engine ctx="txn:PAY-8934"
+```
+
+**Response body:**
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -76,115 +78,80 @@ vault read skyflow/insurance/creds/producer ctx="user:12345"
 }
 ```
 
----
+### Health
 
-### Health Endpoint
+**`GET {mount}/health`** — Performs an internal check (storage access + Skyflow reachability). Useful for readiness probes.
 
-**`GET /skyflow/health`** - Plugin health status
+### Error Surface
 
----
-
-## Security
-
-### Credential Protection
-
-| Control | Implementation |
-|---------|----------------|
-| Storage | Vault seal-wrap encryption |
-| API Response | Credentials never exposed |
-| Tokens | Short-lived JWT (max 1hr) |
-
-### Vault Policies
-
-**Application (token read only):**
-```hcl
-path "skyflow/+/creds/*" {
-  capabilities = ["read"]
-}
-```
-
-**Admin (full access):**
-```hcl
-path "skyflow/+/config" {
-  capabilities = ["create", "read", "update", "delete"]
-}
-path "skyflow/+/roles/*" {
-  capabilities = ["create", "read", "update", "delete", "list"]
-}
-path "skyflow/+/creds/*" {
-  capabilities = ["read"]
-}
-path "skyflow/+/health" {
-  capabilities = ["read"]
-}
-```
-
-### Incident Response
-
-**Credential compromise:**
-```bash
-vault delete skyflow/insurance/config   # Remove immediately
-# Rotate in Skyflow console
-vault write skyflow/insurance/config credentials_json='...'  # Reconfigure
-```
+| Code | Cause |
+|------|-------|
+| 200 | Operation succeeded. |
+| 400 | Validation failed (missing fields, invalid JSON, role has multiple IDs). |
+| 403 | Vault policy denied the request. |
+| 404 | Role or config missing. |
+| 409 | Role already exists (when `POST` uses `?force=false`). |
+| 500 | Internal plugin error. |
+| 503 | Upstream Skyflow service unavailable or timed out. |
 
 ---
 
-## Testing
+## Testing Playbook
 
-### Run Tests
+### Command Suite
 
 ```bash
-# All tests
+# Unit tests (all packages)
 go test ./... -v
 
-# With coverage
+# With coverage summary
 go test ./... -cover
 
-# Coverage report
+# Generate HTML report
 go test ./... -coverprofile=coverage.out
 go tool cover -html=coverage.out
 
-# Race detection
+# Data races
 go test ./... -race
 
-# Integration (requires credentials)
-TEST_MODE=dev go test ./test/... -v
+# Integration tests (needs Vault + Skyflow credentials)
+VAULT_ADDR=http://127.0.0.1:8200 \
+VAULT_TOKEN=root \
+TEST_MODE=integration \
+go test ./test/integration -v
 ```
 
-### Test Structure
+### Package Responsibilities
 
 ```
 backend/
-├── backend_test.go       # Factory, lifecycle
-├── config_test.go        # Config validation
-├── role_test.go          # Role CRUD
-├── path_token_test.go    # Token generation
-└── telemetry/
-    ├── config_test.go
-    ├── emitter_test.go
-    └── noop_test.go
+├─ backend_test.go       # Mount factory, logical paths
+├─ config_test.go        # Config validation + seal-wrap semantics
+├─ role_test.go          # CRUD + role_id invariants
+├─ path_config_test.go   # HTTP semantics for config operations
+├─ path_roles_test.go    # Role lifecycle edge cases
+├─ path_token_test.go    # Token issuance + context plumbing
+└─ telemetry/
+   ├─ config_test.go     # Telemetry toggles
+   └─ traces_test.go     # Attribute coverage
 
 test/integration/
-├── setup.go              # Test harness
-└── token_test.go         # E2E token tests
+├─ setup.go              # Harness bootstraps Vault + plugin
+└─ token_test.go         # End-to-end order/purchase/payment flows
 ```
 
-### Coverage Target
+### Quality Gates
 
-| Metric | Goal |
-|--------|------|
-| Line coverage | >80% |
-| Critical paths | 100% |
+- **Coverage** — Maintain ≥80% line coverage overall and 100% for `path_token` and `config` packages.
+- **Static analysis** — `golangci-lint run` must be clean before merging (enforced in CI).
+- **Contract tests** — Integration suite must exercise at least one token request for order, purchase, and payment mounts to guarantee parity.
+
+### Test Data Guidelines
+
+- Keep fake Skyflow credentials under `testdata/` and never commit production secrets.
+- When simulating roles, prefer names like `order-producer`, `purchase-consumer-portal`, `payment-risk-engine` so examples stay generic.
+- Use context strings that resemble real workloads (`ctx="order:ORD-42"`) to exercise logging/telemetry code paths.
 
 ---
 
-## Error Codes
-
-| Status | Meaning |
-|--------|---------|
-| 200 | Success |
-| 400 | Invalid request |
-| 404 | Role/config not found |
-| 500 | Internal error |
-| 503 | Skyflow API unavailable |
+This guideline should be the single source of truth for how engineers interact with the plugin programmatically and how they prove changes through automated tests.

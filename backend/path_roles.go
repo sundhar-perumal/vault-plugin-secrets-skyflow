@@ -88,11 +88,17 @@ func (b *skyflowBackend) pathRoleExistenceCheck(ctx context.Context, req *logica
 
 // pathRoleList lists all roles
 func (b *skyflowBackend) pathRoleList(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	traces := b.traces()
+	ctx, span := traces.StartRoleList(ctx)
+	defer span.End()
+
 	roles, err := b.listRoles(ctx, req.Storage)
 	if err != nil {
+		traces.RecordRoleError(span, err)
 		return nil, err
 	}
 
+	traces.RecordRoleListSuccess(span)
 	return logical.ListResponse(roles), nil
 }
 
@@ -108,11 +114,16 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 		operation = "update"
 	}
 
+	traces := b.traces()
+	ctx, span := traces.StartRoleWrite(ctx, name, operation)
+	defer span.End()
+
 	// Load existing role or create new one
 	role := defaultRole(name)
 	if req.Operation == logical.UpdateOperation {
 		existingRole, err := b.getRole(ctx, req.Storage, name)
 		if err != nil {
+			traces.RecordRoleError(span, err)
 			return nil, err
 		}
 		if existingRole != nil {
@@ -135,18 +146,22 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 
 	// Validate role
 	if err := role.validate(); err != nil {
+		traces.RecordRoleErrorWithMessage(span, err.Error())
 		return logical.ErrorResponse("invalid role: %s", err.Error()), nil
 	}
 
 	// Save role
 	if err := b.saveRole(ctx, req.Storage, role); err != nil {
+		traces.RecordRoleError(span, err)
 		return nil, err
 	}
 
-	// Emit telemetry
-	if b.emitter != nil {
-		b.emitter.EmitRoleWrite(ctx, name, operation, true)
+	// Record metrics
+	if m := b.metrics(); m != nil {
+		m.RecordRoleWrite(ctx, name, operation)
 	}
+
+	traces.RecordRoleUpdated(span)
 
 	b.Logger().Info("role saved", "name", name, "operation", req.Operation)
 
@@ -157,14 +172,27 @@ func (b *skyflowBackend) pathRoleWrite(ctx context.Context, req *logical.Request
 func (b *skyflowBackend) pathRoleRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	name := data.Get("name").(string)
 
+	traces := b.traces()
+	ctx, span := traces.StartRoleRead(ctx, name)
+	defer span.End()
+
+	// Record metrics
+	if m := b.metrics(); m != nil {
+		m.RecordRoleRead(ctx, name, string(req.Operation))
+	}
+
 	role, err := b.getRole(ctx, req.Storage, name)
 	if err != nil {
+		traces.RecordRoleError(span, err)
 		return nil, err
 	}
 
 	if role == nil {
+		traces.RecordRoleFound(span, false)
 		return nil, nil
 	}
+
+	traces.RecordRoleFound(span, true)
 
 	responseData := map[string]interface{}{
 		"name":        role.Name,
@@ -184,10 +212,16 @@ func (b *skyflowBackend) pathRoleRead(ctx context.Context, req *logical.Request,
 func (b *skyflowBackend) pathRoleDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	name := data.Get("name").(string)
 
+	traces := b.traces()
+	ctx, span := traces.StartRoleDelete(ctx, name)
+	defer span.End()
+
 	if err := b.deleteRole(ctx, req.Storage, name); err != nil {
+		traces.RecordRoleError(span, err)
 		return nil, err
 	}
 
+	traces.RecordRoleDeleted(span)
 	b.Logger().Info("role deleted", "name", name)
 
 	return nil, nil

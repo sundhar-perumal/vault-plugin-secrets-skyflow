@@ -74,6 +74,31 @@ flowchart LR
 - **Fast incident response**: If a credential is compromised, deleting or rotating the mount config immediately cuts off every consumer, avoiding app-by-app fixes.
 - **Ready for catalog submission**: Mirrors other HashiCorp integrations, simplifying review by the Vault integrations team.
 
+## Multi-Vault Layout
+
+Multiple mounts keep Skyflow credentials segmented per product domain while sharing the same plugin binary. Operators can rotate or revoke one mount without touching the others.
+
+```
+vault/
+├─ skyflow/order/     # Order orchestration mount
+│  ├─ config          # Skyflow credentials for order platform
+│  └─ roles/          # Producer/consumer roles per integration
+│      ├─ order-producer
+│      └─ order-consumer-*
+│
+├─ skyflow/purchase/  # Purchase workflow mount
+│  ├─ config
+│  └─ roles/
+│      ├─ purchase-producer
+│      └─ purchase-consumer-*
+│
+└─ skyflow/payment/   # Payment services mount
+   ├─ config
+   └─ roles/
+	   ├─ payment-producer
+	   └─ payment-consumer-*
+```
+
 ## Prerequisites
 
 | Dependency | Requirement |

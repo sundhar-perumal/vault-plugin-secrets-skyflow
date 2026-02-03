@@ -5,11 +5,11 @@ This document describes the structural design of the Skyflow Vault secrets plugi
 ## Runtime Topology
 
 ```
-┌────────────────┐      ┌─────────────────────┐      ┌────────────────┐
-│ Order Service  │ ───▶ │  Vault (Plugin)     │ ───▶ │ Skyflow Vault  │
-│ Purchase App   │     │  skyflow/<mount>/... │     │ Token Service  │
-│ Payment Engine │     │                     │     │                │
-└────────────────┘      └─────────────────────┘      └────────────────┘
+┌────────────────┐       ┌─────────────────────┐       ┌────────────────┐
+│ Order Service  │ ───▶  │  Vault (Plugin)     │ ───▶ │ Skyflow Vault  │
+│ Purchase App   │       │  skyflow/<mount>/...│       │ Token Service  │
+│ Payment Engine │       │                     │       │                │
+└────────────────┘       └─────────────────────┘       └────────────────┘
            │                        │
            │                        ▼
            │             ┌─────────────────────┐
